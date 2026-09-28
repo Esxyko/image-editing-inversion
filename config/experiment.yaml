@@ -1,0 +1,33 @@
+# Shared comparison settings. Use the same file for every method in a run.
+model:
+  model_id: stable-diffusion-v1-5/stable-diffusion-v1-5
+  revision: "451f4fe16113bff5a5d2269ed5ad43b0592e9a14"
+  width: 512
+  height: 512
+
+sampling:
+  num_inference_steps: 50
+  eta: 0.0
+  guidance_scale: 7.5
+  seed: 42
+
+prompt_to_prompt:
+  # "auto" uses replacement for equal-length word sequences and refinement otherwise.
+  mode: auto
+  cross_replace_fraction: 0.4
+  self_replace_fraction: 0.6
+
+# Add method-specific P2P settings under methods.<method_id>.prompt_to_prompt.
+# The shared mode and replacement fractions above still apply.
+methods: {}
+
+runtime:
+  device: cuda
+  dtype: float16
+  batch_size: 1
+  attention_query_chunk_size: 256
+  cpu_offload: none # "none", "model", or "sequential"
+  vae_slicing: false
+  vae_tiling: false
+  num_workers: 0
+  pin_memory: true

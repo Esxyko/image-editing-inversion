@@ -8,13 +8,27 @@ authors = [
 ]
 requires-python = ">=3.14"
 dependencies = [
+    "accelerate>=1.15,<2",
     "datasets>=5.0,<6",
+    "diffusers>=0.40,<0.41",
     "gdown>=6,<7",
     "huggingface-hub>=1.0,<2",
     "openai>=3.18,<4",
     "pillow>=12.0,<13",
+    "pyyaml>=6.0,<7",
     "python-dotenv>=1.0,<2",
+    "safetensors>=0.6,<1",
+    "torch>=2.10,<2.12",
+    "transformers>=5.5,<6",
 ]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu130", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
 
 [project.scripts]
 image-editing-inversion = "image_editing_inversion:main"

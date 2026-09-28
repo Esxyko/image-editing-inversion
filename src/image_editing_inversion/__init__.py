@@ -1,2 +1,5 @@
-def main() -> None:
-    print("Hello from image-editing-inversion!")
+"""Compare inversion artifacts with a shared Prompt-to-Prompt editor."""
+
+from .cli import main
+
+__all__ = ["main"]
