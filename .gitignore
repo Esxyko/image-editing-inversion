@@ -8,3 +8,14 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local environment and credentials
+.env
+.env.*
+!.env.example
+
+# Downloaded datasets
+/data/
+
+# Local dataset-building archive
+/archive/dataset-building/
