@@ -18,19 +18,16 @@ print(example["uid"])
 
 The first call downloads the repository's `train` split and saves its Hugging
 Face Datasets files directly in `data/`. Later calls load that saved copy without
-network access. The loader leaves the existing `data/raw/`, `data/cache/`,
-`data/processed/`, and `data/final/` folders in place. The `data/` directory is
-local and ignored by Git. A full first download needs several gigabytes of
-free disk space for the download cache and saved dataset.
+network access. The `data/` directory is local and ignored by Git. A full first
+download needs several gigabytes of free disk space for the download cache and
+saved dataset.
 
-## Built dataset
+## Dataset contents
 
-The original locally built artifact is at `data/final/image-editing/`. The loader
-above uses the saved dataset files at the `data/` root.
 Each record represents an edit with a source image, a binary edit mask, and a
 pair of captions describing the source and intended result. The edited target
-image is used to prepare MagicBrush captions but is not stored in the final
-artifact.
+image was used to prepare MagicBrush captions but is not stored in the Hub
+dataset.
 
 ### How the records are constructed
 
@@ -62,16 +59,6 @@ caption pair for every retained MagicBrush edit and rejects duplicate UIDs.
 | `mask_img` | 512 × 512 single-channel mask; black is 0 and white is 255 |
 | `source_prompt` | Non-empty caption for the source image |
 | `target_prompt` | Non-empty caption for the intended edit |
-
-Load a locally built artifact with Hugging Face Datasets:
-
-```python
-from datasets import load_from_disk
-
-records = load_from_disk("data/final/image-editing")
-example = records[0]
-print(example["uid"])
-```
 
 ## Shared editing framework
 
@@ -118,19 +105,16 @@ Construct and save one with `InversionArtifact` from
 `image_editing_inversion.artifact`. Use the same model revision, scheduler config,
 and timestep sequence as the editor; the runner rejects mismatches.
 
-For a local dataset, an external inversion implementation can package its
-computed `z_t` tensor as follows:
+For the project Hub dataset, an external inversion implementation can package
+its computed `z_t` tensor as follows:
 
 ```python
-from pathlib import Path
-
-from datasets import load_from_disk
 from image_editing_inversion.artifact import InversionArtifact
 from image_editing_inversion.config import load_config
+from image_editing_inversion.dataset import load_project_dataset
 from image_editing_inversion.editing import Editor
 
-data_dir = Path("data/final/image-editing").resolve()
-records = load_from_disk(str(data_dir))
+records = load_project_dataset()
 config = load_config("config/experiment.yaml")
 editor = Editor(config)
 sample = records[0]
@@ -139,7 +123,7 @@ artifact = InversionArtifact(
     method_id="external-ddim",
     model_id=config.model.model_id,
     model_revision=config.model.revision,
-    dataset_ref="local:image-editing",
+    dataset_ref="beatle-ju1ce/image-editing-inversion",
     dataset_fingerprint=records._fingerprint,
     sample_uid=sample["uid"],
     scheduler_id="ddim",
@@ -158,16 +142,15 @@ The artifact format itself has not changed.
 ```powershell
 uv run image-editing-inversion edit-artifact `
   --config config/experiment.yaml `
-  --dataset-path data/final/image-editing `
   --artifact data/inversions/example `
   --output data/runs
 ```
 
-Repeat `--artifact` to edit several samples. Omitting `--dataset-path` uses the
-private Hub dataset loader described above. Local artifacts use
-`local:image-editing` as their dataset reference, so they can move between
-machines; Hub artifacts use the repository ID. The dataset fingerprint must
-also match. Results are written under a new run directory with `results.jsonl`,
+Repeat `--artifact` to edit several samples. The default uses the private Hub
+dataset loader described above. `--dataset-path` can select a separately saved
+local dataset; artifacts made for that path use `local:image-editing` as their
+dataset reference. Hub artifacts use the repository ID. The dataset fingerprint
+must also match. Results are written under a new run directory with `results.jsonl`,
 `resolved-config.json`, and `edited.png`/`reconstructed.png` per sample. Run
 records contain UIDs and artifact paths, not prompts, source images, or masks.
 
@@ -253,7 +236,6 @@ adapter for every artifact's method ID.
 ```powershell
 uv run image-editing-inversion run `
   --config config/experiment.yaml `
-  --dataset-path data/final/image-editing `
   --method your-method-id `
   --uid your-dataset-uid `
   --output data/runs

@@ -19,13 +19,8 @@
 |       `-- runner.py            # Dataset selection, batching, and run outputs
 `-- data/                       # Local artifacts; ignored by Git
     |-- state.json              # Saved Hub dataset metadata after first load
-    |-- dataset_info.json
-    |-- data-*.arrow            # Saved Hub dataset records
-    |-- raw/
-    |-- cache/
-    |-- processed/
-    `-- final/
-        `-- image-editing/      # Original locally built artifact
+    |-- dataset_info.json       # Created after first load
+    `-- data-*.arrow            # Saved Hub dataset records after first load
 ```
 
 ## Responsibilities
@@ -50,5 +45,5 @@
 - `image_editing_inversion.runner` selects dataset records, supplies the shared
   configuration to adapters and the editor, rejects incompatible editing
   batches, and writes images and compact run records.
-- `data/` is not tracked by Git. Its root holds the saved Hub dataset, while
-  its existing subfolders hold other project artifacts.
+- `data/` is not tracked by Git. Its root holds the saved Hub dataset after the
+  first load.
