@@ -35,6 +35,9 @@ image-editing-inversion = "image_editing_inversion:main"
 
 [project.entry-points."image_editing_inversion.methods"]
 ddim = "image_editing_inversion.methods.ddim:DDIMInversion"
+direct-inversion = "image_editing_inversion.methods.direct:DirectInversion"
+null-text = "image_editing_inversion.methods.null_text:NullTextInversion"
+renoise = "image_editing_inversion.methods.renoise:ReNoiseInversion"
 
 [build-system]
 requires = ["uv_build>=0.12.1,<0.13.0"]

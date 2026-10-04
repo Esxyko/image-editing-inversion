@@ -37,6 +37,11 @@ class InversionMethod(ABC):
     ) -> InversionArtifact:
         """Invert a dataset sample using the resolved editing context."""
 
+    def validate_replay(
+        self, artifact: InversionArtifact, context: InversionContext
+    ) -> None:
+        """Optionally reject method-specific state incompatible with this run."""
+
     def create_denoising_hook(
         self, artifact: InversionArtifact
     ) -> DenoisingHook | None:

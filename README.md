@@ -88,9 +88,10 @@ compatibility wrappers. Saved artifacts and run formats are unchanged.
 
 ## Shared editing framework
 
-The framework bundles a baseline DDIM inversion method and also accepts
-inversion artifacts produced outside the package. It uses Stable Diffusion 1.5,
-DDIM sampling, and a shared Prompt-to-Prompt editor to produce a reconstruction
+The framework bundles baseline DDIM, Null-text Inversion, Direct Inversion, and ReNoise
+methods and accepts inversion artifacts produced outside the package. It uses
+Stable Diffusion 1.5, DDIM sampling, and a shared Prompt-to-Prompt editor to
+produce a reconstruction
 with `source_prompt` and an edit with `target_prompt`. The dataset mask is reserved
 for later metrics; it is not used to constrain the edit.
 
@@ -151,6 +152,180 @@ The implementation is also available as `DDIMInversion` from
 Diffusers is imported when inversion executes; discovering the method does not
 load a model. After updating an existing installation, run `uv sync` to refresh
 the bundled method's Python entry-point metadata.
+
+### Run Null-text Inversion
+
+The bundled `null-text` method implements
+[Null-text Inversion](https://null-text-inversion.github.io/). It deterministically
+encodes the image with the VAE and builds a source-caption DDIM pivot trajectory
+at guidance 1. It then optimizes one unconditional embedding per denoising step
+using the shared `sampling.guidance_scale` and latent reconstruction MSE. Only
+these embeddings are optimized; model weights and conditional embeddings stay
+fixed. Each step starts from the previous step's optimized embedding.
+
+Run from the project root so the adapter can find
+[`method_h_params/Null_text.yaml`](method_h_params/Null_text.yaml). This file is
+resolved relative to the working directory and loaded on the adapter's first
+inversion; its validated settings are cached for that adapter instance. Missing
+or malformed files fail clearly. Omitted keys use the defaults below, and unknown
+keys are rejected. Optimization settings do not change the experiment YAML.
+
+| Hyperparameter | Default | Meaning |
+| --- | --- | --- |
+| `num_inner_steps` | `10` | Maximum Adam updates per timestep; positive integer |
+| `learning_rate` | `0.01` | Initial learning rate; finite and positive |
+| `early_stop_epsilon` | `0.00001` | Initial latent-MSE stopping threshold; finite and nonnegative |
+| `epsilon_increment` | `0.00002` | Threshold increase per timestep; finite and nonnegative |
+
+For step index `i` out of `T`, the learning rate is
+`learning_rate * (1 - i / (2 * T))` and the stopping threshold is
+`early_stop_epsilon + i * epsilon_increment`. The optimized parameter and Adam
+moments use float32, while embeddings are cast to the configured model precision
+for UNet calls. Latent MSE is computed in float32.
+
+Null-text inversion requires `sampling.eta: 0.0`, guidance greater than 1, and a
+DDIM scheduler with epsilon prediction, leading timestep spacing, and disabled
+sample clipping and dynamic thresholding. The inverse schedule must reverse the
+editor's timesteps. Inversion supports `cpu_offload: none` and `model`;
+sequential offload is rejected because optimization needs the UNet to remain
+resident through backward passes. Float16, bfloat16, and float32 use the existing
+hardware restrictions. Reconstruction and editing use `runtime.batch_size`.
+
+To compare all four bundled methods on the same sample and shared settings:
+
+```powershell
+uv run image-editing-inversion run `
+  --config config/experiment.yaml `
+  --method ddim `
+  --method null-text `
+  --method direct-inversion `
+  --method renoise `
+  --uid your-dataset-uid `
+  --output data/runs
+```
+
+Select only `--method null-text` for a Null-text run. Refresh an existing
+installation with `uv sync` to register the new entry point. The adapter is also
+exported as `NullTextInversion` from `image_editing_inversion.methods`.
+
+Null-text artifacts store the terminal pivot plus `null_text_embeddings` of
+shape `[T, 1, token_count, embedding_dim]` in descending denoising order and the
+optimization `guidance_scale` repeated in a `[T]` tensor. The replay hook supplies
+the saved embedding to both source and target unconditional branches at every
+step. Replay rejects incompatible guidance scales and malformed embeddings.
+Use `edit-artifact` with the same sampling guidance and compatible model/scheduler
+settings; it requires neither the hyperparameter file nor further optimization.
+Sequential offload can be used for replay, which runs without gradients.
+
+### Run Direct Inversion
+
+The bundled `direct-inversion` method implements Ju et al.'s
+[Direct Inversion, later published as PnP Inversion](https://github.com/cure-lab/PnPInversion).
+It deterministically encodes the source image with the VAE posterior mode and
+builds a source-caption DDIM pivot trajectory at guidance 1, using the same
+inverse scheduler approach as Null-text Inversion. It then follows the descending
+schedule with an empty unconditional caption and the configured sampling guidance.
+At each step, it records the latent residual
+`previous_pivot - predicted_previous_latent` and advances from the corrected latent.
+It performs no optimization and needs no method hyperparameter file.
+
+```powershell
+uv run image-editing-inversion run `
+  --config config/experiment.yaml `
+  --method direct-inversion `
+  --uid your-dataset-uid `
+  --output data/runs
+```
+
+Refresh an existing installation with `uv sync` to register the entry point.
+The adapter is also exported as `DirectInversion` from
+`image_editing_inversion.methods`.
+
+Direct Inversion requires `sampling.eta: 0.0`, finite nonnegative sampling
+guidance, and a DDIM scheduler with epsilon prediction, leading timestep spacing,
+and disabled sample clipping and dynamic thresholding. The inverse timesteps must
+exactly reverse the editor's denoising schedule. Inversion and replay run without
+gradients and support `cpu_offload: none`, `model`, and `sequential`, subject to
+the existing hardware restrictions. Inversion processes one sample at a time;
+reconstruction and editing use `runtime.batch_size` and the shared Prompt-to-Prompt
+attention policy.
+
+Direct Inversion artifacts retain schema v1 and store the terminal pivot plus
+`direct_inversion_offsets` of shape `[T, 1, 4, height/8, width/8]` in descending
+denoising order. They also store the sampling `guidance_scale` repeated in a
+float64 `[T]` tensor. The replay hook adds each saved offset at full strength to
+the source latent after the DDIM update; the target branch receives no direct
+latent correction. Shared Prompt-to-Prompt attention transfer still affects
+the target branch. Replay rejects malformed or non-finite state and incompatible
+guidance, model, dataset, scheduler, or timestep settings. Use `edit-artifact`
+with the same sampling guidance and compatible configuration; it performs no
+new inversion. Reconstruction can differ from the original image because of
+VAE encoding/decoding and numerical precision.
+
+### Run ReNoise Inversion
+
+The bundled `renoise` method implements the core iterative noising and averaging
+from [ReNoise: Real Image Inversion Through Iterative Noising](https://github.com/garibida/ReNoise-Inversion).
+It deterministically encodes the source image with the VAE posterior mode and
+traverses the shared DDIM timesteps in ascending order. At each timestep, the
+previous latent remains fixed while successive UNet predictions refine the noisy
+latent estimate. Every prediction uses the current noisy timestep, the source
+caption, an empty unconditional caption, and `sampling.guidance_scale`.
+The inverse update uses the editor's actual DDIM alpha products, timestep stride,
+and final-step boundary. The selected predictions are averaged in float32 before
+one final inverse update; UNet inputs use the configured runtime precision.
+
+Run from the project root so the adapter can find
+[`method_h_params/ReNoise.yaml`](method_h_params/ReNoise.yaml). The file is loaded
+on the adapter's first inversion and its validated settings are cached for that
+instance. Missing or malformed files fail clearly, unknown keys are rejected,
+and omitted keys use these defaults:
+
+| Hyperparameter | Default | Meaning |
+| --- | --- | --- |
+| `num_renoise_steps` | `9` | Refinements after the initial prediction; nonnegative integer |
+| `max_num_renoise_steps_first_step` | `5` | Refinement cap for every timestep below 250; nonnegative integer |
+| `average_latent_estimations` | `true` | Use the average of predictions in the selected window; boolean |
+| `average_first_step_range` | `[0, 5]` | Prediction averaging window for timesteps below 250 |
+| `average_step_range` | `[8, 10]` | Prediction averaging window for timesteps at or above 250 |
+
+Averaging windows use zero-based prediction indices, including the initial
+prediction at index 0, with an exclusive end. Each window must satisfy
+`0 <= start < end <= effective_refinements + 1`, even when averaging is disabled.
+Reduce the windows as well when reducing the iteration counts. With the default
+settings, each timestep below 250 makes 6 UNet calls and each later timestep
+makes 10; averaging adds no UNet call. Disabling averaging uses the last estimate.
+These settings are independent of the shared experiment YAML.
+
+```powershell
+uv run image-editing-inversion run `
+  --config config/experiment.yaml `
+  --method renoise `
+  --uid your-dataset-uid `
+  --output data/runs
+```
+
+Refresh an existing installation with `uv sync` to register the entry point.
+The adapter is also exported as `ReNoiseInversion` from
+`image_editing_inversion.methods`.
+
+ReNoise requires `sampling.eta: 0.0`, finite nonnegative sampling guidance, and
+a DDIM scheduler with epsilon prediction, leading timestep spacing, and disabled
+sample clipping and dynamic thresholding. Inversion and replay run without
+gradients and support `cpu_offload: none`, `model`, and `sequential`, subject to
+the existing hardware restrictions. Inversion processes one sample at a time;
+reconstruction and editing use `runtime.batch_size` and the shared Prompt-to-Prompt
+attention policy. This adapter implements deterministic SD 1.5 inversion;
+noise regularization and stochastic noise correction are not included.
+
+ReNoise artifacts retain schema v1 and store the terminal latent plus sampling
+`guidance_scale` repeated in a float64 `[T]` tensor. Replay rejects malformed or
+non-finite state and incompatible guidance, model, dataset, scheduler, or timestep
+settings. The replay hook validates the timestep and latent shape while leaving
+the shared denoising state unchanged. Use `edit-artifact` with the same sampling
+guidance and compatible configuration; replay needs neither the hyperparameter
+file nor further inversion. Reconstruction is approximate and can differ from
+the source because of inversion error, VAE encoding/decoding, and precision.
 
 ### Edit from a saved artifact
 
@@ -230,6 +405,10 @@ Implement `InversionMethod.invert(sample, context)` and return an
 `InversionArtifact`. `InversionContext` provides the shared editor and resolved config,
 plus dataset reference and fingerprint. A method that needs per-step behavior
 also implements `create_denoising_hook(artifact)` to return a `DenoisingHook`.
+Override the optional `validate_replay(artifact, context)` to check method-specific
+state or configuration before the runner creates that hook; the default does
+nothing. Direct editor callers should invoke this validation themselves before
+creating a method's hook.
 Hooks receive source/target latents and text embeddings before and after each
 denoising step. Install the method through the
 `image_editing_inversion.methods` Python entry-point group. Published inversion
@@ -311,8 +490,8 @@ uv run image-editing-inversion run `
   --output data/runs
 ```
 
-Repeat `--method` or `--uid` for a comparison. The bundled `ddim` method is
-available after installing the project; other method IDs require registered
-adapters. All methods in one run use the same model, sampling, shared
-Prompt-to-Prompt, and runtime configuration. Both commands
+Repeat `--method` or `--uid` for a comparison. The bundled `ddim`, `null-text`,
+`direct-inversion`, and `renoise` methods are available after installing the project;
+other method IDs require registered adapters. All methods in one run use the
+same model, sampling, shared Prompt-to-Prompt, and runtime configuration. Both commands
 require `--config`, so separate runs can select different YAML files.

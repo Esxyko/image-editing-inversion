@@ -161,6 +161,7 @@ class ExperimentRunner:
 
     def _hook_for(self, method: InversionMethod, artifact: InversionArtifact) -> Any:
         self._check_method_batch_size(method)
+        method.validate_replay(artifact, self.inversion_context)
         hook = method.create_denoising_hook(artifact)
         if artifact.per_step_state and hook is None:
             raise ValueError(

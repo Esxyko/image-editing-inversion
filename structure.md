@@ -8,6 +8,9 @@
 |-- pyproject.toml
 |-- config/
 |   `-- experiment.yaml         # Shared settings and optional per-method P2P settings
+|-- method_h_params/
+|   |-- Null_text.yaml          # Null-text optimization settings; loaded from cwd
+|   `-- ReNoise.yaml            # ReNoise refinement and averaging settings; loaded from cwd
 |-- src/
 |   `-- image_editing_inversion/
 |       |-- __init__.py          # Console entry point
@@ -29,7 +32,10 @@
 |       |   |-- base.py          # InversionMethod adapter interface
 |       |   |-- context.py       # InversionContext passed to adapters
 |       |   |-- ddim.py          # Deterministic DDIM inversion baseline
+|       |   |-- direct.py        # Conditional pivots, latent residuals, and source-only replay hook
 |       |   |-- hooks.py         # Denoising state and hook contracts
+|       |   |-- null_text.py     # Pivotal inversion, null-text optimization, and replay hook
+|       |   |-- renoise.py       # Iterative DDIM noising, prediction averaging, and replay validation
 |       |   `-- registry.py      # Registration and entry-point discovery
 |       |-- editing/
 |       |   |-- __init__.py      # Public editing API; imports Editor on demand
@@ -54,9 +60,16 @@
 - `README.md` describes dataset loading, artifact editing, method adapters,
   and how the combined dataset was constructed.
 - `pyproject.toml` defines the project package, console entry point, bundled
-  DDIM method entry point, and shared Python dependencies.
+  DDIM, Null-text, Direct Inversion, and ReNoise method entry points, and shared Python
+  dependencies.
 - `config/experiment.yaml` is the checked-in example of common pipeline
   settings and hardware-limited runtime values.
+- `method_h_params/Null_text.yaml` supplies Null-text optimization settings,
+  loaded relative to the working directory and cached by the adapter on its
+  first inversion. Discovery and artifact replay do not read this file.
+- `method_h_params/ReNoise.yaml` supplies ReNoise refinement counts and prediction
+  averaging windows, loaded relative to the working directory and cached by the
+  adapter on its first inversion. Discovery and artifact replay do not read it.
 - `image_editing_inversion.__init__` exports the console entry point.
 - `image_editing_inversion.cli` parses `edit-artifact` and `run` commands.
 - `image_editing_inversion.config` loads and validates shared settings and
@@ -71,7 +84,17 @@
   `InversionContext`, denoising state and hooks, and method registration and
   entry-point discovery. Its `ddim` submodule implements the first bundled
   inversion algorithm using the shared pipeline and sampling guidance, with
-  a separate inverse scheduler. Adapters can select a Prompt-to-Prompt subclass.
+  a separate inverse scheduler. Its `null_text` submodule builds conditional-only
+  DDIM pivots and optimizes per-step unconditional embeddings, then supplies
+  their replay hook. Its `direct` submodule builds conditional-only DDIM pivots,
+  records per-step latent residuals at the sampling guidance, and supplies a
+  source-only after-step replay hook without optimization or extra settings.
+  Its `renoise` submodule iteratively reverses the editor's deterministic DDIM
+  updates using fixed previous latents and prediction averaging. It records
+  sampling guidance and supplies a validating hook that leaves denoising state
+  unchanged. It does not implement regularization or stochastic noise correction.
+  Adapters can validate method-specific replay compatibility
+  and select a Prompt-to-Prompt subclass.
 - `image_editing_inversion.editing` owns model loading, the subclassable
   Prompt-to-Prompt attention policy, and shared reconstruction/editing.
   `ModelRuntime` owns pipeline setup; `Editor` owns shared prompt encoding,
@@ -79,7 +102,8 @@
   Attention alignment, policy, and Diffusers integration have separate files.
 - `image_editing_inversion.experiments` composes the other modules.
   `ExperimentRunner` supplies configuration and samples to adapters and the
-  editor and rejects incompatible batches. `RunOutput` owns run directories,
+  editor and validates method-specific replay state before creating hooks.
+  It rejects incompatible batches. `RunOutput` owns run directories,
   configuration snapshots, artifact/image paths, image writes, and run records.
 - `data/` is not tracked by Git. Its root holds the saved Hub dataset after the
   first load.
@@ -91,7 +115,8 @@
 - `methods` depends on configuration and artifacts. Editor and attention policy
   types are imported only under `TYPE_CHECKING`; discovery does not import
   experiments or the model runtime. Concrete methods use the editor supplied
-  by `InversionContext`; DDIM imports Diffusers only when inversion executes.
+  by `InversionContext`; all bundled methods import Diffusers only when
+  inversion executes.
 - `editing` depends on configuration, artifacts, and denoising hook contracts.
   Importing its attention policy does not import Diffusers; `Editor` is exported
   lazily and model weights are loaded only when an editor is constructed.
