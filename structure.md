@@ -25,9 +25,10 @@
 |       |   |-- __init__.py      # Public artifact API
 |       |   `-- inversion.py     # Artifact validation and serialization
 |       |-- methods/
-|       |   |-- __init__.py      # Public adapter contracts and registry API
+|       |   |-- __init__.py      # Public methods, adapter contracts, and registry API
 |       |   |-- base.py          # InversionMethod adapter interface
 |       |   |-- context.py       # InversionContext passed to adapters
+|       |   |-- ddim.py          # Deterministic DDIM inversion baseline
 |       |   |-- hooks.py         # Denoising state and hook contracts
 |       |   `-- registry.py      # Registration and entry-point discovery
 |       |-- editing/
@@ -52,8 +53,8 @@
 
 - `README.md` describes dataset loading, artifact editing, method adapters,
   and how the combined dataset was constructed.
-- `pyproject.toml` defines the project package, console entry point, and shared
-  Python dependencies.
+- `pyproject.toml` defines the project package, console entry point, bundled
+  DDIM method entry point, and shared Python dependencies.
 - `config/experiment.yaml` is the checked-in example of common pipeline
   settings and hardware-limited runtime values.
 - `image_editing_inversion.__init__` exports the console entry point.
@@ -68,10 +69,13 @@
   format, compatibility checks, and JSON/safetensors serialization.
 - `image_editing_inversion.methods` owns the inversion adapter interface,
   `InversionContext`, denoising state and hooks, and method registration and
-  entry-point discovery. Adapters can select a Prompt-to-Prompt subclass.
+  entry-point discovery. Its `ddim` submodule implements the first bundled
+  inversion algorithm using the shared pipeline and sampling guidance, with
+  a separate inverse scheduler. Adapters can select a Prompt-to-Prompt subclass.
 - `image_editing_inversion.editing` owns model loading, the subclassable
   Prompt-to-Prompt attention policy, and shared reconstruction/editing.
-  `ModelRuntime` owns pipeline setup; `Editor` owns denoising and hook execution.
+  `ModelRuntime` owns pipeline setup; `Editor` owns shared prompt encoding,
+  denoising, and hook execution.
   Attention alignment, policy, and Diffusers integration have separate files.
 - `image_editing_inversion.experiments` composes the other modules.
   `ExperimentRunner` supplies configuration and samples to adapters and the
@@ -86,7 +90,8 @@
   experiment orchestration.
 - `methods` depends on configuration and artifacts. Editor and attention policy
   types are imported only under `TYPE_CHECKING`; discovery does not import
-  experiments or the model runtime.
+  experiments or the model runtime. Concrete methods use the editor supplied
+  by `InversionContext`; DDIM imports Diffusers only when inversion executes.
 - `editing` depends on configuration, artifacts, and denoising hook contracts.
   Importing its attention policy does not import Diffusers; `Editor` is exported
   lazily and model weights are loaded only when an editor is constructed.

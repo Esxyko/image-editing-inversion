@@ -70,7 +70,7 @@ The package has six subpackages with public APIs exported from their
 | `config` | Experiment settings, hardware validation, and YAML loading |
 | `data` | Dataset loading, identity validation, and UID-based sample access |
 | `artifacts` | Portable inversion artifact validation and serialization |
-| `methods` | Inversion adapter interfaces, context, hooks, and discovery |
+| `methods` | Inversion algorithms, adapter interfaces, context, hooks, and discovery |
 | `editing` | Model runtime, token alignment, Prompt-to-Prompt, and denoising |
 | `experiments` | Experiment orchestration, batching, and run output |
 
@@ -88,8 +88,8 @@ compatibility wrappers. Saved artifacts and run formats are unchanged.
 
 ## Shared editing framework
 
-The first framework milestone accepts inversion artifacts produced outside the
-package. No inversion algorithm is bundled yet. It uses Stable Diffusion 1.5,
+The framework bundles a baseline DDIM inversion method and also accepts
+inversion artifacts produced outside the package. It uses Stable Diffusion 1.5,
 DDIM sampling, and a shared Prompt-to-Prompt editor to produce a reconstruction
 with `source_prompt` and an edit with `target_prompt`. The dataset mask is reserved
 for later metrics; it is not used to constrain the edit.
@@ -118,6 +118,39 @@ keep the batch size at one and consider `cpu_offload: model` or
 `cpu_offload: sequential` and a smaller `attention_query_chunk_size`. An
 unsupported device or option combination fails before model loading. A run saves its resolved
 configuration in `resolved-config.json`.
+
+### Run baseline DDIM inversion
+
+The bundled `ddim` method converts the source image to RGB, resizes it through
+the pipeline image processor to the configured dimensions, and uses the VAE
+posterior mode to encode it deterministically. It then follows the ascending
+DDIM noise schedule using `source_prompt`, an empty negative caption, and the
+shared `sampling.guidance_scale`. The inverse schedule must exactly reverse the
+editor's denoising timesteps. This baseline requires `sampling.eta: 0.0` and
+rejects dynamic thresholding or incompatible inverse schedules.
+
+```powershell
+uv run image-editing-inversion run `
+  --config config/experiment.yaml `
+  --method ddim `
+  --uid your-dataset-uid `
+  --output data/runs
+```
+
+The runner saves the terminal latent and provenance in the existing artifact
+format, then produces `reconstructed.png` and `edited.png` with the shared
+Prompt-to-Prompt policy. DDIM artifacts have no per-step state and need no
+denoising hook. Inversion processes one sample at a time; reconstruction and
+editing use `runtime.batch_size`. Saved DDIM artifacts can be replayed with
+`edit-artifact` using a compatible configuration. DDIM inversion is approximate,
+so reconstruction need not reproduce the source image exactly.
+
+The implementation is also available as `DDIMInversion` from
+`image_editing_inversion.methods`. Adapters can share prompt encoding through
+`context.editor.encode_prompts`, which validates the model's CLIP token limit.
+Diffusers is imported when inversion executes; discovering the method does not
+load a model. After updating an existing installation, run `uv sync` to refresh
+the bundled method's Python entry-point metadata.
 
 ### Edit from a saved artifact
 
@@ -278,7 +311,8 @@ uv run image-editing-inversion run `
   --output data/runs
 ```
 
-Repeat `--method` or `--uid` for a comparison. The `run` command will report a
-missing adapter until one is installed. All methods in one run use the same
-model, sampling, shared Prompt-to-Prompt, and runtime configuration. Both commands
+Repeat `--method` or `--uid` for a comparison. The bundled `ddim` method is
+available after installing the project; other method IDs require registered
+adapters. All methods in one run use the same model, sampling, shared
+Prompt-to-Prompt, and runtime configuration. Both commands
 require `--config`, so separate runs can select different YAML files.

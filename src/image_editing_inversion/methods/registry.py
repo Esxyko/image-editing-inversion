@@ -25,7 +25,7 @@ def register_method(method: InversionMethod) -> InversionMethod:
 
 
 def get_method(method_id: str) -> InversionMethod:
-    """Return a registered method or raise a clear error for future adapters."""
+    """Return a registered method or raise a clear error for missing adapters."""
     try:
         return _METHOD_REGISTRY[method_id]
     except KeyError as exc:
@@ -36,7 +36,7 @@ def get_method(method_id: str) -> InversionMethod:
 
 
 def registered_methods() -> tuple[str, ...]:
-    """List available adapter IDs without importing any future implementations."""
+    """List registered adapter IDs without triggering entry-point discovery."""
     return tuple(sorted(_METHOD_REGISTRY))
 
 

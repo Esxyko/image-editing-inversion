@@ -279,7 +279,7 @@ class ExperimentRunner:
         return self.output_dir
 
     def run_methods(self, method_ids: Sequence[str], uids: Sequence[str]) -> Path:
-        """Invert selected records with future registered methods, then edit them."""
+        """Invert selected records with registered methods, then edit them."""
         discover_methods()
         methods = [(method_id, get_method(method_id)) for method_id in method_ids]
         for _, method in methods:

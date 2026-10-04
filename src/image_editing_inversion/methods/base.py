@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 
 class InversionMethod(ABC):
-    """Implement this interface to register a future inversion algorithm."""
+    """Implement this interface to register an inversion algorithm."""
 
     @property
     @abstractmethod

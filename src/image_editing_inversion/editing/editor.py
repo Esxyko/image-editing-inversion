@@ -56,7 +56,8 @@ class Editor:
             scheduler_config=self.scheduler_config,
         )
 
-    def _encode_prompts(self, prompts: list[str]) -> torch.Tensor:
+    def encode_prompts(self, prompts: list[str]) -> torch.Tensor:
+        """Encode captions with the shared CLIP token-limit validation."""
         tokenizer = self.pipeline.tokenizer
         tokens = tokenizer(
             prompts,
@@ -293,8 +294,8 @@ class Editor:
             settings=validated_settings,
         )
         prompts = source_prompts + target_prompts
-        prompt_embeddings = self._encode_prompts(prompts)
-        negative_prompt_embeddings = self._encode_prompts([""] * (2 * batch_size))
+        prompt_embeddings = self.encode_prompts(prompts)
+        negative_prompt_embeddings = self.encode_prompts([""] * (2 * batch_size))
         base_latents = torch.cat(
             [self._prepare_latent(artifact.terminal_latent) for artifact in artifacts]
         )
