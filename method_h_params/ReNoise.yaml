@@ -1,7 +1,7 @@
 # Loaded relative to the working directory on the adapter's first inversion.
 # Counts are refinements after the initial prediction; averaging ends are exclusive.
-num_renoise_steps: 9
-max_num_renoise_steps_first_step: 5
+num_renoise_steps: 1
+max_num_renoise_steps_first_step: 1
 average_latent_estimations: true
-average_first_step_range: [0, 5]
-average_step_range: [8, 10]
+average_first_step_range: [0, 2]
+average_step_range: [1, 2]
