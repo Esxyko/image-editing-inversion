@@ -7,17 +7,11 @@ from datasets import Dataset, load_dataset, load_from_disk
 from dotenv import load_dotenv
 from huggingface_hub import get_token
 
+from .schema import HUB_DATASET_REF, REQUIRED_COLUMNS
 
-_REPO_ID = "beatle-ju1ce/image-editing-inversion"
-_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _DATA_DIR = _PROJECT_ROOT / "data"
-_EXPECTED_COLUMNS = {
-    "uid",
-    "source_img",
-    "mask_img",
-    "source_prompt",
-    "target_prompt",
-}
 
 
 def load_project_dataset() -> Dataset:
@@ -50,21 +44,21 @@ def load_project_dataset() -> Dataset:
         token = os.getenv("HF_TOKEN") or get_token()
         if not token:
             raise RuntimeError(
-                f"{_REPO_ID} is private. Set HF_TOKEN in the environment or "
+                f"{HUB_DATASET_REF} is private. Set HF_TOKEN in the environment or "
                 "the project .env file, or log in with the Hugging Face CLI."
             )
 
         try:
-            dataset = load_dataset(_REPO_ID, split="train", token=token)
+            dataset = load_dataset(HUB_DATASET_REF, split="train", token=token)
         except Exception as exc:
             raise RuntimeError(
-                f"Could not download {_REPO_ID}. Check dataset access, HF_TOKEN "
+                f"Could not download {HUB_DATASET_REF}. Check dataset access, HF_TOKEN "
                 "or Hugging Face login, and the network connection."
             ) from exc
 
-        if not isinstance(dataset, Dataset) or set(dataset.column_names) != _EXPECTED_COLUMNS:
+        if not isinstance(dataset, Dataset) or set(dataset.column_names) != REQUIRED_COLUMNS:
             raise RuntimeError(
-                f"Downloaded {_REPO_ID}, but its train split does not have the "
+                f"Downloaded {HUB_DATASET_REF}, but its train split does not have the "
                 "expected project columns. No dataset was saved."
             )
 
@@ -76,7 +70,7 @@ def load_project_dataset() -> Dataset:
                 "may be incomplete; keep the other data/ folders when repairing it."
             ) from exc
 
-    if not isinstance(dataset, Dataset) or set(dataset.column_names) != _EXPECTED_COLUMNS:
+    if not isinstance(dataset, Dataset) or set(dataset.column_names) != REQUIRED_COLUMNS:
         raise RuntimeError(
             f"The dataset at {_DATA_DIR} does not have the expected project columns."
         )

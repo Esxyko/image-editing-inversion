@@ -9,7 +9,7 @@ in your environment or add it to the project's ignored `.env` file. The
 also works.
 
 ```python
-from image_editing_inversion.dataset import load_project_dataset
+from image_editing_inversion.data import load_project_dataset
 
 records = load_project_dataset()
 example = records[0]
@@ -60,6 +60,32 @@ caption pair for every retained MagicBrush edit and rejects duplicate UIDs.
 | `source_prompt` | Non-empty caption for the source image |
 | `target_prompt` | Non-empty caption for the intended edit |
 
+## Package modules
+
+The package has six subpackages with public APIs exported from their
+`__init__.py` files:
+
+| Subpackage | Responsibility |
+| --- | --- |
+| `config` | Experiment settings, hardware validation, and YAML loading |
+| `data` | Dataset loading, identity validation, and UID-based sample access |
+| `artifacts` | Portable inversion artifact validation and serialization |
+| `methods` | Inversion adapter interfaces, context, hooks, and discovery |
+| `editing` | Model runtime, token alignment, Prompt-to-Prompt, and denoising |
+| `experiments` | Experiment orchestration, batching, and run output |
+
+See [`structure.md`](structure.md) for implementation responsibilities and
+dependency boundaries. Import public classes and functions from these
+subpackages rather than their implementation files.
+
+The former `image_editing_inversion.dataset`, `image_editing_inversion.artifact`,
+and `image_editing_inversion.runner` modules have been removed. Use `data` for
+dataset loading, `artifacts` for `InversionArtifact`, `methods` for adapter and
+hook APIs, and `experiments` for `ExperimentRunner`, `edit_artifacts`, and
+`run_methods`. Configuration and editing APIs remain exported from `config`
+and `editing`. External adapters must update moved imports; there are no
+compatibility wrappers. Saved artifacts and run formats are unchanged.
+
 ## Shared editing framework
 
 The first framework milestone accepts inversion artifacts produced outside the
@@ -102,16 +128,16 @@ model and DDIM scheduler settings, eta, and descending timesteps. Optional
 per-step tensors have one entry per timestep and require that method's registered
 denoising hook. The artifact does not duplicate dataset images, prompts, or masks.
 Construct and save one with `InversionArtifact` from
-`image_editing_inversion.artifact`. Use the same model revision, scheduler config,
+`image_editing_inversion.artifacts`. Use the same model revision, scheduler config,
 and timestep sequence as the editor; the runner rejects mismatches.
 
 For the project Hub dataset, an external inversion implementation can package
 its computed `z_t` tensor as follows:
 
 ```python
-from image_editing_inversion.artifact import InversionArtifact
+from image_editing_inversion.artifacts import InversionArtifact
 from image_editing_inversion.config import load_config
-from image_editing_inversion.dataset import load_project_dataset
+from image_editing_inversion.data import load_project_dataset
 from image_editing_inversion.editing import Editor
 
 records = load_project_dataset()
@@ -155,6 +181,17 @@ must also match. Results are written under a new run directory with `results.jso
 records contain UIDs and artifact paths, not prompts, source images, or masks.
 
 ### Add an inversion method
+
+Import adapter contracts from the methods subpackage:
+
+```python
+from image_editing_inversion.methods import (
+    DenoisingHook,
+    DenoisingStepState,
+    InversionContext,
+    InversionMethod,
+)
+```
 
 Implement `InversionMethod.invert(sample, context)` and return an
 `InversionArtifact`. `InversionContext` provides the shared editor and resolved config,

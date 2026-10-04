@@ -2,33 +2,19 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
-from uuid import uuid4
 
-from datasets import Dataset, load_from_disk
-
-from .artifact import InversionArtifact, InversionMethod, discover_methods, get_method
-from .config import ExperimentConfig, load_config
-from .dataset import load_project_dataset
-from .editing import Editor, PromptToPrompt
-
-
-_HUB_DATASET_REF = "beatle-ju1ce/image-editing-inversion"
-_LOCAL_DATASET_REF = "local:image-editing"
-_REQUIRED_COLUMNS = {
-    "uid",
-    "source_img",
-    "mask_img",
-    "source_prompt",
-    "target_prompt",
-}
+from ..artifacts import InversionArtifact
+from ..config import ExperimentConfig, load_config
+from ..data import DatasetRepository
+from ..editing import Editor, PromptToPrompt
+from ..methods import InversionContext, InversionMethod, discover_methods, get_method
+from .output import RunOutput
 
 
 @dataclass(slots=True)
@@ -38,16 +24,6 @@ class _WorkItem:
     sample: Mapping[str, Any]
     ordinal: int
     inversion_seconds: float | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class InversionContext:
-    """Shared model runtime and dataset identity passed to method adapters."""
-
-    editor: Editor
-    config: ExperimentConfig
-    dataset_ref: str
-    dataset_fingerprint: str
 
 
 def _chunks(items: Iterable[Any], size: int) -> Iterable[list[Any]]:
@@ -72,40 +48,20 @@ class ExperimentRunner:
     ) -> None:
         self.config: ExperimentConfig = load_config(config_path)
         self.config.validate_hardware()
-        if dataset_path is None:
-            self.dataset = load_project_dataset()
-            self.dataset_ref = _HUB_DATASET_REF
-            self.dataset_location = _HUB_DATASET_REF
-        else:
-            resolved_path = dataset_path.expanduser().resolve()
-            self.dataset = load_from_disk(str(resolved_path))
-            self.dataset_ref = _LOCAL_DATASET_REF
-            self.dataset_location = resolved_path.as_posix()
-        if not isinstance(self.dataset, Dataset):
-            raise ValueError("The dataset source must contain one Hugging Face Dataset.")
-        if set(self.dataset.column_names) != _REQUIRED_COLUMNS:
-            raise ValueError("The dataset does not have the project's five expected columns.")
-        self.dataset_fingerprint = str(getattr(self.dataset, "_fingerprint", ""))
-        if not self.dataset_fingerprint:
-            raise ValueError("The dataset has no fingerprint for artifact validation.")
-        uids = self.dataset["uid"]
-        self._uid_to_index = {uid: index for index, uid in enumerate(uids)}
-        if len(self._uid_to_index) != len(uids):
-            raise ValueError("The dataset contains duplicate UIDs.")
-
-        run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
-        self.output_dir = output_root.expanduser().resolve() / run_id
-        self.output_dir.mkdir(parents=True, exist_ok=False)
-        self.results_path = self.output_dir / "results.jsonl"
-        snapshot = {
-            "config": self.config.to_dict(),
-            "dataset_ref": self.dataset_ref,
-            "dataset_fingerprint": self.dataset_fingerprint,
-            "dataset_location": self.dataset_location,
-        }
-        (self.output_dir / "resolved-config.json").write_text(
-            json.dumps(snapshot, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        self._repository = DatasetRepository(dataset_path)
+        self.dataset = self._repository.dataset
+        self.dataset_ref = self._repository.dataset_ref
+        self.dataset_location = self._repository.dataset_location
+        self.dataset_fingerprint = self._repository.dataset_fingerprint
+        self._output = RunOutput(
+            output_root,
+            self.config,
+            self.dataset_ref,
+            self.dataset_fingerprint,
+            self.dataset_location,
         )
+        self.output_dir = self._output.output_dir
+        self.results_path = self._output.results_path
         self._editor: Editor | None = None
         self._next_ordinal = 0
 
@@ -130,10 +86,7 @@ class ExperimentRunner:
         return ordinal
 
     def _sample(self, uid: str) -> Mapping[str, Any]:
-        try:
-            return self.dataset[self._uid_to_index[uid]]
-        except KeyError as exc:
-            raise ValueError(f"Dataset UID not found: {uid}") from exc
+        return self._repository.sample(uid)
 
     def _fetch_many(self, function: Any, values: Sequence[Any]) -> list[Any]:
         """Use the configured number of threads for dataset/artifact reads."""
@@ -157,31 +110,12 @@ class ExperimentRunner:
             return exc
 
     def _check_artifact_identity(self, artifact: InversionArtifact) -> None:
-        if artifact.dataset_ref != self.dataset_ref:
-            raise ValueError(
-                f"Artifact dataset {artifact.dataset_ref!r} differs from "
-                f"selected dataset {self.dataset_ref!r}."
-            )
-        if artifact.dataset_fingerprint != self.dataset_fingerprint:
-            raise ValueError("Artifact dataset fingerprint differs from selected dataset.")
-        if artifact.sample_uid not in self._uid_to_index:
-            raise ValueError(f"Artifact UID not found in dataset: {artifact.sample_uid}")
+        self._repository.validate_identity(
+            artifact.dataset_ref, artifact.dataset_fingerprint, artifact.sample_uid
+        )
 
     def _record(self, values: Mapping[str, Any]) -> None:
-        record = {
-            "dataset_ref": self.dataset_ref,
-            "dataset_fingerprint": self.dataset_fingerprint,
-            "settings_file": "resolved-config.json",
-            **values,
-        }
-        with self.results_path.open("a", encoding="utf-8") as stream:
-            stream.write(json.dumps(record, sort_keys=True) + "\n")
-
-    def _image_dir(self, item: _WorkItem) -> Path:
-        digest = hashlib.sha256(
-            f"{item.artifact.method_id}\0{item.artifact.sample_uid}".encode("utf-8")
-        ).hexdigest()[:12]
-        return self.output_dir / "images" / f"{item.ordinal:06d}-{digest}"
+        self._output.record(values)
 
     def _method_for(self, artifact: InversionArtifact) -> InversionMethod:
         try:
@@ -278,12 +212,13 @@ class ExperimentRunner:
             batch_seconds = time.perf_counter() - started
             records: list[dict[str, Any]] = []
             for item, result in zip(items, edited, strict=True):
-                image_dir = self._image_dir(item)
-                image_dir.mkdir(parents=True, exist_ok=False)
-                reconstructed_path = image_dir / "reconstructed.png"
-                edited_path = image_dir / "edited.png"
-                result.reconstructed.save(reconstructed_path, format="PNG")
-                result.edited.save(edited_path, format="PNG")
+                reconstructed_path, edited_path = self._output.save_images(
+                    item.artifact.method_id,
+                    item.artifact.sample_uid,
+                    item.ordinal,
+                    result.reconstructed,
+                    result.edited,
+                )
                 records.append(
                     {
                         "uid": item.artifact.sample_uid,
@@ -369,13 +304,8 @@ class ExperimentRunner:
                                 "different method or UID."
                             )
                         self._check_artifact_identity(artifact)
-                        digest = hashlib.sha256(
-                            f"{method_id}\0{uid}".encode()
-                        ).hexdigest()[:12]
-                        artifact_path = (
-                            self.output_dir
-                            / "artifacts"
-                            / f"{self._next_ordinal:06d}-{digest}"
+                        artifact_path = self._output.artifact_path(
+                            method_id, uid, self._next_ordinal
                         )
                         artifact.save(artifact_path)
                     except Exception as exc:

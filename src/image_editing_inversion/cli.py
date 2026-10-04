@@ -53,7 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        from .runner import edit_artifacts, run_methods
+        from .experiments import edit_artifacts, run_methods
 
         if args.command == "edit-artifact":
             run_dir = edit_artifacts(

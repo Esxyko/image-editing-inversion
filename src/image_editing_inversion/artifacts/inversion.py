@@ -1,26 +1,20 @@
-"""Portable inversion artifacts and extension points for inversion methods.
+"""Portable inversion artifact validation and serialization.
 
-An artifact is one sample's terminal latent plus enough provenance to reproduce
-its denoising schedule. Images, prompts, and masks remain in the dataset.
+Images, prompts, and masks remain in the dataset. Artifacts store the terminal
+latent and provenance needed to reproduce its denoising schedule.
 """
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from importlib.metadata import entry_points
 import json
 import math
 from pathlib import Path
 import re
-from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 import torch
 from safetensors.torch import load_file, save_file
-
-if TYPE_CHECKING:
-    from .editing import PromptToPrompt
-    from .runner import InversionContext
 
 
 _SCHEMA_VERSION = 1
@@ -292,129 +286,3 @@ class InversionArtifact:
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(f"Invalid inversion artifact at {directory}: {exc}") from exc
-
-
-@dataclass(frozen=True, slots=True)
-class DenoisingStepState:
-    """One source/target pair in source-first order during a denoising step.
-
-    ``variance_noise`` is present in a before-step call when DDIM eta is
-    positive. A before-step hook may replace it to control that stochastic
-    DDIM update; after-step calls receive ``None``.
-    """
-
-    latents: torch.Tensor
-    prompt_embeddings: torch.Tensor
-    negative_prompt_embeddings: torch.Tensor
-    variance_noise: torch.Tensor | None = None
-
-
-class DenoisingHook:
-    """Optional method-specific changes around each shared denoising step."""
-
-    def before_step(
-        self, step_index: int, timestep: int, state: DenoisingStepState
-    ) -> DenoisingStepState:
-        return state
-
-    def after_step(
-        self, step_index: int, timestep: int, state: DenoisingStepState
-    ) -> DenoisingStepState:
-        return state
-
-
-class InversionMethod(ABC):
-    """Implement this interface to register a future inversion algorithm."""
-
-    @property
-    @abstractmethod
-    def method_id(self) -> str:
-        """Stable ID written into artifacts and run records."""
-
-    @property
-    def max_edit_batch_size(self) -> int | None:
-        """Largest shared-editor batch supported by the method's hook, if limited."""
-        return None
-
-    @property
-    def prompt_to_prompt_class(self) -> type[PromptToPrompt] | None:
-        """Optional P2P subclass for this method; ``None`` uses the shared base."""
-        return None
-
-    @abstractmethod
-    def invert(
-        self, sample: Mapping[str, Any], context: InversionContext
-    ) -> InversionArtifact:
-        """Invert a dataset sample using the resolved editing context."""
-
-    def create_denoising_hook(
-        self, artifact: InversionArtifact
-    ) -> DenoisingHook | None:
-        """Return a hook when the artifact has method-specific per-step state."""
-        return None
-
-
-_METHOD_REGISTRY: dict[str, InversionMethod] = {}
-_DISCOVERED_ENTRY_POINTS: set[tuple[str, str]] = set()
-
-
-def register_method(method: InversionMethod) -> InversionMethod:
-    """Register one inversion method instance by its stable ID."""
-    if not isinstance(method, InversionMethod):
-        raise TypeError("method must implement InversionMethod")
-    method_id = _required_string(method.method_id, "method_id")
-    if method_id in _METHOD_REGISTRY:
-        raise ValueError(f"Inversion method {method_id!r} is already registered")
-    _METHOD_REGISTRY[method_id] = method
-    return method
-
-
-def get_method(method_id: str) -> InversionMethod:
-    """Return a registered method or raise a clear error for future adapters."""
-    try:
-        return _METHOD_REGISTRY[method_id]
-    except KeyError as exc:
-        raise KeyError(
-            f"Inversion method {method_id!r} is not registered; "
-            "install or implement its adapter first"
-        ) from exc
-
-
-def registered_methods() -> tuple[str, ...]:
-    """List available adapter IDs without importing any future implementations."""
-    return tuple(sorted(_METHOD_REGISTRY))
-
-
-def discover_methods() -> tuple[str, ...]:
-    """Load installed adapters from ``image_editing_inversion.methods``.
-
-    Each entry point must be named for its method ID and export either an
-    ``InversionMethod`` instance or a zero-argument subclass. Repeated calls
-    do not reload or reregister entry points already discovered.
-    """
-    group = "image_editing_inversion.methods"
-    for entry_point in entry_points(group=group):
-        identity = (entry_point.name, entry_point.value)
-        if identity in _DISCOVERED_ENTRY_POINTS:
-            continue
-        try:
-            exported = entry_point.load()
-            method = exported() if isinstance(exported, type) else exported
-            if not isinstance(method, InversionMethod):
-                raise TypeError(
-                    "entry point must export an InversionMethod instance "
-                    "or zero-argument subclass"
-                )
-            if method.method_id != entry_point.name:
-                raise ValueError(
-                    f"entry point name {entry_point.name!r} does not match "
-                    f"method ID {method.method_id!r}"
-                )
-            register_method(method)
-        except Exception as exc:
-            raise RuntimeError(
-                f"Cannot load inversion method entry point "
-                f"{entry_point.name!r} ({entry_point.value}): {exc}"
-            ) from exc
-        _DISCOVERED_ENTRY_POINTS.add(identity)
-    return registered_methods()

@@ -18,4 +18,4 @@ wheels/
 /data/
 
 # Local dataset-building archive
-/archive/dataset-building/
+archive
