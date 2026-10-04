@@ -1,4 +1,4 @@
-﻿# Image Editing Inversion
+# Image Editing Inversion
 
 ## Load the project dataset
 
@@ -70,9 +70,9 @@ The package has six subpackages with public APIs exported from their
 | `config` | Experiment settings, hardware validation, and YAML loading |
 | `data` | Dataset loading, identity validation, and UID-based sample access |
 | `artifacts` | Portable inversion artifact validation and serialization |
-| `methods` | Inversion algorithms, adapter interfaces, context, hooks, and discovery |
-| `editing` | Model runtime, token alignment, Prompt-to-Prompt, and denoising |
-| `experiments` | Experiment orchestration, batching, and run output |
+| `inversion` | Adapter interfaces, context, hooks, discovery, and algorithms in `inversion.methods` |
+| `generation` | Model runtime, token alignment, Prompt-to-Prompt, and denoising |
+| `workflows` | Workflow orchestration, batching, and run output |
 
 See [`structure.md`](structure.md) for implementation responsibilities and
 dependency boundaries. Import public classes and functions from these
@@ -80,10 +80,10 @@ subpackages rather than their implementation files.
 
 The former `image_editing_inversion.dataset`, `image_editing_inversion.artifact`,
 and `image_editing_inversion.runner` modules have been removed. Use `data` for
-dataset loading, `artifacts` for `InversionArtifact`, `methods` for adapter and
-hook APIs, and `experiments` for `ExperimentRunner`, `edit_artifacts`, and
-`run_methods`. Configuration and editing APIs remain exported from `config`
-and `editing`. External adapters must update moved imports; there are no
+dataset loading, `artifacts` for `InversionArtifact`, `inversion` for adapter and
+hook APIs, and `workflows` for `WorkflowRunner`, `edit_artifacts`, and
+`run_methods`. Configuration and generation APIs are exported from `config`
+and `generation`. External adapters must update moved imports; there are no
 compatibility wrappers. Saved artifacts retain their portable format; sweep
 outputs are grouped by pipeline parameter filename as described below.
 
@@ -220,7 +220,7 @@ editing use `runtime.batch_size`. Saved DDIM artifacts can be replayed with
 so reconstruction need not reproduce the source image exactly.
 
 The implementation is also available as `DDIMInversion` from
-`image_editing_inversion.methods`. Adapters can share prompt encoding through
+`image_editing_inversion.inversion`. Adapters can share prompt encoding through
 `context.editor.encode_prompts`, which validates the model's CLIP token limit.
 Diffusers is imported when inversion executes; discovering the method does not
 load a model. After updating an existing installation, run `uv sync` to refresh
@@ -278,7 +278,7 @@ uv run image-editing-inversion run `
 
 Select only `--method null-text` for a Null-text run. Refresh an existing
 installation with `uv sync` to register the new entry point. The adapter is also
-exported as `NullTextInversion` from `image_editing_inversion.methods`.
+exported as `NullTextInversion` from `image_editing_inversion.inversion`.
 
 Null-text artifacts store the terminal pivot plus `null_text_embeddings` of
 shape `[T, 1, token_count, embedding_dim]` in descending denoising order and the
@@ -310,7 +310,7 @@ uv run image-editing-inversion run `
 
 Refresh an existing installation with `uv sync` to register the entry point.
 The adapter is also exported as `DirectInversion` from
-`image_editing_inversion.methods`.
+`image_editing_inversion.inversion`.
 
 Direct Inversion requires `sampling.eta: 0.0`, finite nonnegative sampling
 guidance, and a DDIM scheduler with epsilon prediction, leading timestep spacing,
@@ -377,7 +377,7 @@ uv run image-editing-inversion run `
 
 Refresh an existing installation with `uv sync` to register the entry point.
 The adapter is also exported as `ReNoiseInversion` from
-`image_editing_inversion.methods`.
+`image_editing_inversion.inversion`.
 
 ReNoise requires `sampling.eta: 0.0`, finite nonnegative sampling guidance, and
 a DDIM scheduler with epsilon prediction, leading timestep spacing, and disabled
@@ -416,7 +416,7 @@ its computed `z_t` tensor as follows:
 from image_editing_inversion.artifacts import InversionArtifact
 from image_editing_inversion.config import load_config
 from image_editing_inversion.data import load_project_dataset
-from image_editing_inversion.editing import Editor
+from image_editing_inversion.generation import Editor
 
 records = load_project_dataset()
 config = load_config("default.yaml")
@@ -461,10 +461,10 @@ records contain UIDs and artifact paths, not prompts, source images, or masks.
 
 ### Add an inversion method
 
-Import adapter contracts from the methods subpackage:
+Import adapter contracts from the inversion subpackage:
 
 ```python
-from image_editing_inversion.methods import (
+from image_editing_inversion.inversion import (
     DenoisingHook,
     DenoisingStepState,
     InversionContext,
@@ -493,11 +493,15 @@ reuse. All four bundled adapters opt in; Null-text and ReNoise expose the same
 resolved settings used by inversion. Explicit replay does not call this method.
 Hooks receive source/target latents and text embeddings before and after each
 denoising step. Install the method through the
-`image_editing_inversion.methods` Python entry-point group. Published inversion
-implementations can then be adapted without changing the common editor.
+`image_editing_inversion.methods` Python entry-point group. This discovery group
+remains unchanged; Python imports now use `image_editing_inversion.inversion`,
+with bundled implementations under `image_editing_inversion.inversion.methods`.
+The former methods package has been removed without compatibility wrappers.
+Published inversion implementations can then be adapted without changing the
+common editor.
 
 To customize attention behavior, subclass `PromptToPrompt` from
-`image_editing_inversion.editing` and return that class from the adapter's
+`image_editing_inversion.generation` and return that class from the adapter's
 `prompt_to_prompt_class` property. The base class exposes `artifacts`,
 `settings`, `step_index`, and `pair_maps`. Override `build_pair_map` for token
 alignment, `active` for the replacement schedule, or
@@ -512,7 +516,7 @@ For example, a subclass can blend mapped source attention with the target's
 original attention:
 
 ```python
-from image_editing_inversion.editing import PromptToPrompt
+from image_editing_inversion.generation import PromptToPrompt
 
 class BlendedPromptToPrompt(PromptToPrompt):
     @classmethod

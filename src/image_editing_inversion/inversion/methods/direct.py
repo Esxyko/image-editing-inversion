@@ -13,10 +13,10 @@ from typing import TYPE_CHECKING, Any, Mapping
 from PIL import Image
 import torch
 
-from ..artifacts import ArtifactCompatibilityError, InversionArtifact
-from .base import InversionMethod
-from .context import InversionContext
-from .hooks import DenoisingHook, DenoisingStepState
+from ...artifacts import ArtifactCompatibilityError, InversionArtifact
+from ..base import InversionMethod
+from ..context import InversionContext
+from ..hooks import DenoisingHook, DenoisingStepState
 
 if TYPE_CHECKING:
     from diffusers import DDIMInverseScheduler

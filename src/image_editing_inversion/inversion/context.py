@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 from ..config import ExperimentConfig
 
 if TYPE_CHECKING:
-    from ..editing import Editor
+    from ..generation import Editor
 
 
 @dataclass(frozen=True, slots=True)

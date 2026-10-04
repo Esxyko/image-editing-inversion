@@ -1,4 +1,4 @@
-"""Command-line entry points for inversion experiments."""
+"""Command-line entry points for inversion workflows."""
 
 import argparse
 import sys
@@ -52,7 +52,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        from .experiments import edit_artifacts, run_methods
+        from .workflows import edit_artifacts, run_methods
 
         if args.command == "edit-artifact":
             run_dir = edit_artifacts(

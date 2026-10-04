@@ -10,7 +10,7 @@ import torch
 
 from ..artifacts import InversionArtifact, normalize_scheduler_config
 from ..config import ExperimentConfig
-from ..methods.hooks import DenoisingHook, DenoisingStepState
+from ..inversion.hooks import DenoisingHook, DenoisingStepState
 from .processor import _PromptToPromptProcessor
 from .prompt_to_prompt import PromptToPrompt
 from .result import EditResult

@@ -10,7 +10,7 @@ from .context import InversionContext
 from .hooks import DenoisingHook
 
 if TYPE_CHECKING:
-    from ..editing import PromptToPrompt
+    from ..generation import PromptToPrompt
 
 
 class InversionMethod(ABC):

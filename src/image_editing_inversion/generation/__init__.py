@@ -1,4 +1,4 @@
-"""Public editing results, attention policies, and shared editor.
+"""Public generation results, attention policies, and shared editor.
 
 The editor is imported on demand so attention policy adapters do not need to
 import Diffusers just to define their policy subclasses.

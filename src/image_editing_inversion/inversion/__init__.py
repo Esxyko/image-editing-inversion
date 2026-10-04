@@ -2,12 +2,9 @@
 
 from .base import InversionMethod
 from .context import InversionContext
-from .ddim import DDIMInversion
-from .direct import DirectInversion
 from .hooks import DenoisingHook, DenoisingStepState
-from .null_text import NullTextInversion
+from .methods import DDIMInversion, DirectInversion, NullTextInversion, ReNoiseInversion
 from .registry import discover_methods, get_method, register_method, registered_methods
-from .renoise import ReNoiseInversion
 
 __all__ = [
     "DDIMInversion",

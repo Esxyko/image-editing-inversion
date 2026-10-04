@@ -15,11 +15,11 @@ from PIL import Image
 import torch
 import yaml
 
-from ..artifacts import ArtifactCompatibilityError, InversionArtifact
-from ..config import ConfigError
-from .base import InversionMethod
-from .context import InversionContext
-from .hooks import DenoisingHook, DenoisingStepState
+from ...artifacts import ArtifactCompatibilityError, InversionArtifact
+from ...config import ConfigError
+from ..base import InversionMethod
+from ..context import InversionContext
+from ..hooks import DenoisingHook, DenoisingStepState
 
 
 _SETTINGS_PATH = Path("method_h_params/ReNoise.yaml")

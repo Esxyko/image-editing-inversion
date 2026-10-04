@@ -15,8 +15,8 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from ..artifacts import ArtifactCatalog, ArtifactCompatibilityError, InversionArtifact
 from ..config import ExperimentConfig, discover_pipeline_h_params, load_config
 from ..data import DatasetRepository
-from ..editing import Editor, PromptToPrompt
-from ..methods import InversionContext, InversionMethod, discover_methods, get_method
+from ..generation import Editor, PromptToPrompt
+from ..inversion import InversionContext, InversionMethod, discover_methods, get_method
 from .output import RunOutput, SweepOutput
 
 
@@ -41,7 +41,7 @@ def _chunks(items: Iterable[Any], size: int) -> Iterable[list[Any]]:
         yield chunk
 
 
-class ExperimentRunner:
+class WorkflowRunner:
     """Run parameter files sequentially with one dataset and model runtime."""
 
     def __init__(
@@ -176,14 +176,14 @@ class ExperimentRunner:
         if not isinstance(parameters, Mapping):
             raise TypeError("inversion_cache_parameters must return a mapping or None")
         if method.method_id not in self._fingerprints:
-            editing_dir = Path(inspect.getfile(Editor)).parent
+            generation_dir = Path(inspect.getfile(Editor)).parent
             sources = {
                 "method": Path(inspect.getfile(type(method))),
                 "base": Path(inspect.getfile(InversionMethod)),
                 "context": Path(inspect.getfile(InversionContext)),
                 "hooks": Path(inspect.getfile(InversionMethod)).with_name("hooks.py"),
-                "editor": editing_dir / "editor.py",
-                "runtime": editing_dir / "runtime.py",
+                "editor": generation_dir / "editor.py",
+                "runtime": generation_dir / "runtime.py",
                 "artifact": Path(inspect.getfile(InversionArtifact)),
             }
             self._fingerprints[method.method_id] = {
@@ -506,7 +506,7 @@ def edit_artifacts(
     *,
     pipeline_h_params_file: str | Path | None = None,
 ) -> Path:
-    return ExperimentRunner(
+    return WorkflowRunner(
         dataset_path, output_root, pipeline_h_params_file=pipeline_h_params_file
     ).edit_artifacts(
         artifact_paths
@@ -524,7 +524,7 @@ def run_methods(
     discover_methods()
     for method_id in method_ids:
         get_method(method_id)
-    return ExperimentRunner(
+    return WorkflowRunner(
         dataset_path, output_root, pipeline_h_params_file=pipeline_h_params_file
     ).run_methods(
         method_ids, uids

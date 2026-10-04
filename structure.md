@@ -1,4 +1,4 @@
-﻿# Project Structure
+# Project Structure
 
 ```text
 .
@@ -29,27 +29,29 @@
 |       |   |-- __init__.py      # Public artifact API
 |       |   |-- catalog.py       # Shared artifact storage, lookup, integrity, and atomic catalog
 |       |   `-- inversion.py     # Artifact validation and serialization
-|       |-- methods/
+|       |-- inversion/
 |       |   |-- __init__.py      # Public methods, adapter contracts, and registry API
 |       |   |-- base.py          # InversionMethod adapter interface
 |       |   |-- context.py       # InversionContext passed to adapters
-|       |   |-- ddim.py          # Deterministic DDIM inversion baseline
-|       |   |-- direct.py        # Conditional pivots, latent residuals, and source-only replay hook
 |       |   |-- hooks.py         # Denoising state and hook contracts
-|       |   |-- null_text.py     # Pivotal inversion, null-text optimization, and replay hook
-|       |   |-- renoise.py       # Iterative DDIM noising, prediction averaging, and replay validation
-|       |   `-- registry.py      # Registration and entry-point discovery
-|       |-- editing/
-|       |   |-- __init__.py      # Public editing API; imports Editor on demand
+|       |   |-- registry.py      # Registration and entry-point discovery
+|       |   `-- methods/
+|       |       |-- __init__.py  # Bundled inversion method classes
+|       |       |-- ddim.py      # Deterministic DDIM inversion baseline
+|       |       |-- direct.py    # Conditional pivots, latent residuals, and source-only replay hook
+|       |       |-- null_text.py # Pivotal inversion, null-text optimization, and replay hook
+|       |       `-- renoise.py   # Iterative DDIM noising, prediction averaging, and replay validation
+|       |-- generation/
+|       |   |-- __init__.py      # Public generation API; imports Editor on demand
 |       |   |-- runtime.py       # ModelRuntime pipeline/device/offload setup
 |       |   |-- alignment.py     # Prompt token mapping and PairAttentionMap
 |       |   |-- prompt_to_prompt.py # Subclassable attention policy
 |       |   |-- processor.py     # Diffusers attention integration
 |       |   |-- editor.py        # Shared reconstruction and DDIM editing loop
 |       |   `-- result.py        # EditResult image pair
-|       `-- experiments/
-|           |-- __init__.py      # Public experiment API
-|           |-- runner.py        # ExperimentRunner batching and orchestration
+|       `-- workflows/
+|           |-- __init__.py      # Public workflow API
+|           |-- runner.py        # WorkflowRunner batching and orchestration
 |           `-- output.py        # SweepOutput manifest and RunOutput snapshots/images/records
 `-- data/                       # Local artifacts; ignored by Git
     |-- state.json              # Saved Hub dataset metadata after first load
@@ -95,30 +97,30 @@
   digests and file checksums. It publishes complete artifacts before atomically
   updating the catalog and assumes one active writer. Compatibility mismatches
   use `ArtifactCompatibilityError`; malformed state remains an ordinary error.
-- `image_editing_inversion.methods` owns the inversion adapter interface,
+- `image_editing_inversion.inversion` owns the inversion adapter interface,
   `InversionContext`, denoising state and hooks, and method registration and
-  entry-point discovery. Its `ddim` submodule implements the first bundled
+  entry-point discovery. Its `methods.ddim` submodule implements the first bundled
   inversion algorithm using the shared pipeline and sampling guidance, with
-  a separate inverse scheduler. Its `null_text` submodule builds conditional-only
+  a separate inverse scheduler. Its `methods.null_text` submodule builds conditional-only
   DDIM pivots and optimizes per-step unconditional embeddings, then supplies
-  their replay hook. Its `direct` submodule builds conditional-only DDIM pivots,
+  their replay hook. Its `methods.direct` submodule builds conditional-only DDIM pivots,
   records per-step latent residuals at the sampling guidance, and supplies a
   source-only after-step replay hook without optimization or extra settings.
-  Its `renoise` submodule iteratively reverses the editor's deterministic DDIM
+  Its `methods.renoise` submodule iteratively reverses the editor's deterministic DDIM
   updates using fixed previous latents and prediction averaging. It records
   sampling guidance and supplies a validating hook that leaves denoising state
   unchanged. It does not implement regularization or stochastic noise correction.
   Adapters can validate method-specific replay compatibility, select a
   Prompt-to-Prompt subclass, and opt into reuse through
   `inversion_cache_parameters`. External adapters disable caching by default.
-- `image_editing_inversion.editing` owns model loading, the subclassable
+- `image_editing_inversion.generation` owns model loading, the subclassable
   Prompt-to-Prompt attention policy, and shared reconstruction/editing.
   `ModelRuntime` owns pipeline setup, numerical cache settings, and scheduler
   reconfiguration without reloading weights; `Editor` owns shared prompt encoding,
   denoising, hook execution, and synchronized configuration updates.
   Attention alignment, policy, and Diffusers integration have separate files.
-- `image_editing_inversion.experiments` composes the other modules.
-  `ExperimentRunner` supplies configuration and samples to adapters and the
+- `image_editing_inversion.workflows` composes the other modules.
+  `WorkflowRunner` supplies configuration and samples to adapters and the
   editor, builds inversion cache identities, and validates replay state before
   creating hooks. It shares the dataset/model across sequential parameter files,
   reuses catalog matches, skips incompatible explicit replay pairs, and rejects
@@ -130,23 +132,26 @@
 
 ## Dependency boundaries
 
-- `config`, `artifacts`, and `data` do not depend on methods, editing, or
-  experiment orchestration.
-- `methods` depends on configuration and artifacts. Editor and attention policy
+- `config`, `artifacts`, and `data` do not depend on inversion, generation, or
+  workflow orchestration.
+- `inversion` depends on configuration and artifacts. Editor and attention policy
   types are imported only under `TYPE_CHECKING`; discovery does not import
-  experiments or the model runtime. Concrete methods use the editor supplied
+  workflows or the model runtime. Concrete methods use the editor supplied
   by `InversionContext`; all bundled methods import Diffusers only when
   inversion executes.
-- `editing` depends on configuration, artifacts, and denoising hook contracts.
+- `generation` depends on configuration, artifacts, and denoising hook contracts.
   Importing its attention policy does not import Diffusers; `Editor` is exported
   lazily and model weights are loaded only when an editor is constructed.
-- `experiments` coordinates the lower-level modules. Its output component uses
+- `workflows` coordinates the lower-level modules. Its output component uses
   configuration and image contracts without importing the editor or runner.
-- `cli.py` imports experiments only when executing a parsed command.
+- `cli.py` imports workflows only when executing a parsed command.
 
 Each subpackage exports its public API through `__init__.py`. Implementation
 helpers remain private. The old flat `artifact.py`, `dataset.py`, and `runner.py`
-paths have no compatibility wrappers. The console entry point, plugin
-entry-point group and portable artifact schema remain unchanged. Pipeline
+paths have no compatibility wrappers. Use `image_editing_inversion.inversion`
+for inversion contracts and discovery, and `image_editing_inversion.inversion.methods`
+for bundled algorithms. The renamed package has no compatibility wrappers.
+The console entry point, plugin entry-point group (`image_editing_inversion.methods`),
+and portable artifact schema remain unchanged. Pipeline
 parameters now live in separate YAML files; run outputs use filename children
 and a parent sweep manifest. `load_config` requires a pipeline parameter file.

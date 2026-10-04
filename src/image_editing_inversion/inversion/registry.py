@@ -41,7 +41,7 @@ def registered_methods() -> tuple[str, ...]:
 
 
 def discover_methods() -> tuple[str, ...]:
-    """Load installed adapters from ``image_editing_inversion.methods``.
+    """Load installed adapters from the ``image_editing_inversion.methods`` group.
 
     Each entry point must be named for its method ID and export either an
     ``InversionMethod`` instance or a zero-argument subclass. Repeated calls

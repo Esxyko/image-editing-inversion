@@ -16,11 +16,11 @@ import torch
 import torch.nn.functional as functional
 import yaml
 
-from ..artifacts import ArtifactCompatibilityError, InversionArtifact
-from ..config import ConfigError
-from .base import InversionMethod
-from .context import InversionContext
-from .hooks import DenoisingHook, DenoisingStepState
+from ...artifacts import ArtifactCompatibilityError, InversionArtifact
+from ...config import ConfigError
+from ..base import InversionMethod
+from ..context import InversionContext
+from ..hooks import DenoisingHook, DenoisingStepState
 
 if TYPE_CHECKING:
     from diffusers import DDIMInverseScheduler

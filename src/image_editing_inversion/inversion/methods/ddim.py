@@ -7,9 +7,9 @@ from typing import Any, Mapping
 from PIL import Image
 import torch
 
-from ..artifacts import InversionArtifact
-from .base import InversionMethod
-from .context import InversionContext
+from ...artifacts import InversionArtifact
+from ..base import InversionMethod
+from ..context import InversionContext
 
 
 class DDIMInversion(InversionMethod):
