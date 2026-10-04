@@ -6,19 +6,15 @@ model:
   height: 512
 
 sampling:
-  num_inference_steps: 50
   eta: 0.0
-  guidance_scale: 7.5
   seed: 42
 
 prompt_to_prompt:
   # "auto" uses replacement for equal-length word sequences and refinement otherwise.
   mode: auto
-  cross_replace_fraction: 0.4
-  self_replace_fraction: 0.6
 
 # Add method-specific P2P settings under methods.<method_id>.prompt_to_prompt.
-# The shared mode and replacement fractions above still apply.
+# The shared mode and fractions from pipeline_h_params still apply.
 methods: {}
 
 runtime:

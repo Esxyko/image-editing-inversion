@@ -25,6 +25,10 @@ _STATE_PREFIX = "state/"
 _STATE_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]*$")
 
 
+class ArtifactCompatibilityError(ValueError):
+    """A valid artifact cannot be replayed with the selected configuration."""
+
+
 def _required_string(value: object, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must be a non-empty string")
@@ -46,6 +50,16 @@ def _json_object(value: Mapping[str, Any], name: str) -> dict[str, Any]:
         return json.loads(json.dumps(dict(value), allow_nan=False))
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{name} must contain only JSON-compatible values") from exc
+
+
+def normalize_scheduler_config(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Keep full scheduler settings while stabilizing unordered default metadata."""
+    config = _json_object(value, "scheduler_config")
+    defaults = config.get("_use_default_values")
+    # Diffusers constructs these names from a set; order has no scheduling meaning.
+    if isinstance(defaults, list) and all(isinstance(name, str) for name in defaults):
+        config["_use_default_values"] = sorted(defaults)
+    return config
 
 
 def _timesteps_tuple(values: Sequence[int] | torch.Tensor) -> tuple[int, ...]:
@@ -107,7 +121,7 @@ class InversionArtifact:
         )
         self.sample_uid = _required_string(self.sample_uid, "sample_uid")
         self.scheduler_id = _required_string(self.scheduler_id, "scheduler_id")
-        self.scheduler_config = _json_object(self.scheduler_config, "scheduler_config")
+        self.scheduler_config = normalize_scheduler_config(self.scheduler_config)
         if isinstance(self.eta, bool) or not isinstance(self.eta, (int, float)):
             raise ValueError("eta must be a finite non-negative number")
         self.eta = float(self.eta)
@@ -172,15 +186,15 @@ class InversionArtifact:
             mismatches.append("DDIM eta")
         if self.timesteps != _timesteps_tuple(timesteps):
             mismatches.append("timestep schedule")
-        if scheduler_config is not None and self.scheduler_config != _json_object(
-            scheduler_config, "scheduler_config"
+        if scheduler_config is not None and self.scheduler_config != normalize_scheduler_config(
+            scheduler_config
         ):
             mismatches.append("scheduler configuration")
         expected_shape = (1, 4, config.model.height // 8, config.model.width // 8)
         if tuple(self.terminal_latent.shape) != expected_shape:
             mismatches.append("latent resolution")
         if mismatches:
-            raise ValueError(
+            raise ArtifactCompatibilityError(
                 "Inversion artifact is incompatible with this run: "
                 + ", ".join(mismatches)
             )

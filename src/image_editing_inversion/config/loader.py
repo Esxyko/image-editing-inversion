@@ -72,21 +72,65 @@ def _choice(value: Any, name: str, choices: set[str]) -> str:
     return result
 
 
-def load_config(path: str | Path) -> ExperimentConfig:
-    """Parse and validate one YAML file; no pipeline defaults are hidden here."""
-    config_path = Path(path)
+def _read_mapping(path: Path) -> dict[str, Any]:
     try:
-        with config_path.open("r", encoding="utf-8") as file:
+        with path.open("r", encoding="utf-8") as file:
             data = yaml.safe_load(file)
     except OSError as exc:
-        raise ConfigError(f"Cannot read config at {config_path}: {exc}") from exc
+        raise ConfigError(f"Cannot read config at {path}: {exc}") from exc
     except (UnicodeError, yaml.YAMLError) as exc:
-        raise ConfigError(f"Invalid YAML at {config_path}: {exc}") from exc
-
+        raise ConfigError(f"Invalid YAML at {path}: {exc}") from exc
     if not isinstance(data, dict):
-        raise ConfigError(f"Config at {config_path} must be a YAML mapping")
+        raise ConfigError(f"Config at {path} must be a YAML mapping")
     if any(not isinstance(name, str) for name in data):
-        raise ConfigError("Config section names must be strings")
+        raise ConfigError(f"Config section names at {path} must be strings")
+    return data
+
+
+def _pipeline_path(filename: str | Path) -> Path:
+    directory = Path("pipeline_h_params").resolve()
+    requested = Path(filename)
+    path = (directory / requested if len(requested.parts) == 1 else requested).resolve()
+    if path.parent != directory or path.suffix.lower() not in {".yaml", ".yml"}:
+        raise ConfigError("Pipeline parameters must be a YAML file inside pipeline_h_params/")
+    if not path.is_file():
+        raise ConfigError(f"Pipeline parameter file does not exist: {path}")
+    return path
+
+
+def discover_pipeline_h_params(filename: str | Path | None = None) -> tuple[Path, ...]:
+    """Select one file or all top-level parameter files in filename order."""
+    if filename is not None:
+        return (_pipeline_path(filename),)
+    directory = Path("pipeline_h_params")
+    if not directory.is_dir():
+        raise ConfigError(f"Pipeline parameter directory does not exist: {directory}")
+    files = sorted(
+        (path for path in directory.iterdir()
+         if path.is_file() and path.suffix.lower() in {".yaml", ".yml"}),
+        key=lambda path: path.name,
+    )
+    if not files:
+        raise ConfigError(f"No YAML parameter files found in {directory}")
+    return tuple(_pipeline_path(path) for path in files)
+
+
+def load_config(pipeline_h_params_file: str | Path) -> ExperimentConfig:
+    """Combine config.yaml with one selected pipeline parameter file."""
+    data = _read_mapping(Path("config.yaml"))
+    pipeline_path = _pipeline_path(pipeline_h_params_file)
+    pipeline_data = _read_mapping(pipeline_path)
+    if set(pipeline_data) != {"sampling", "prompt_to_prompt"}:
+        raise ConfigError(
+            f"Pipeline parameters at {pipeline_path} must contain only sampling "
+            "and prompt_to_prompt sections"
+        )
+    pipeline_sampling = _section(
+        pipeline_data, "sampling", {"num_inference_steps", "guidance_scale"}
+    )
+    pipeline_p2p = _section(
+        pipeline_data, "prompt_to_prompt", {"cross_replace_fraction", "self_replace_fraction"}
+    )
 
     sections = {"model", "sampling", "prompt_to_prompt", "runtime"}
     missing = sections - data.keys()
@@ -97,12 +141,8 @@ def load_config(path: str | Path) -> ExperimentConfig:
         raise ConfigError(f"Config has unknown sections: {', '.join(sorted(extra))}")
 
     model_data = _section(data, "model", {"model_id", "revision", "width", "height"})
-    sampling_data = _section(
-        data, "sampling", {"num_inference_steps", "eta", "guidance_scale", "seed"}
-    )
-    p2p_data = _section(
-        data, "prompt_to_prompt", {"mode", "cross_replace_fraction", "self_replace_fraction"}
-    )
+    sampling_data = {**_section(data, "sampling", {"eta", "seed"}), **pipeline_sampling}
+    p2p_data = {**_section(data, "prompt_to_prompt", {"mode"}), **pipeline_p2p}
     runtime_data = _section(
         data,
         "runtime",

@@ -6,7 +6,7 @@ and stochastic noise correction are outside this adapter's scope.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import math
 from pathlib import Path
 from typing import Any, Mapping
@@ -15,7 +15,7 @@ from PIL import Image
 import torch
 import yaml
 
-from ..artifacts import InversionArtifact
+from ..artifacts import ArtifactCompatibilityError, InversionArtifact
 from ..config import ConfigError
 from .base import InversionMethod
 from .context import InversionContext
@@ -170,6 +170,14 @@ class ReNoiseInversion(InversionMethod):
     def method_id(self) -> str:
         return "renoise"
 
+    def _inversion_settings(self) -> _ReNoiseSettings:
+        if self._settings is None:
+            self._settings = _ReNoiseSettings.load(_SETTINGS_PATH)
+        return self._settings
+
+    def inversion_cache_parameters(self, context: InversionContext) -> Mapping[str, Any]:
+        return asdict(self._inversion_settings())
+
     @staticmethod
     def _validate_context(context: InversionContext) -> dict[str, Any]:
         config = context.config
@@ -187,20 +195,22 @@ class ReNoiseInversion(InversionMethod):
     def validate_replay(
         self, artifact: InversionArtifact, context: InversionContext
     ) -> None:
-        scheduler_config = self._validate_context(context)
+        guidance_scale = _artifact_state(artifact)
         artifact.validate_compatibility(
             context.config,
             dataset_ref=context.dataset_ref,
             dataset_fingerprint=context.dataset_fingerprint,
             timesteps=context.editor.expected_timesteps,
-            scheduler_config=scheduler_config,
+            scheduler_config=context.editor.scheduler_config,
         )
-        guidance_scale = _artifact_state(artifact)
         if not math.isclose(
             guidance_scale, context.config.sampling.guidance_scale,
             rel_tol=0, abs_tol=1e-9,
         ):
-            raise ValueError("ReNoise artifact guidance scale does not match this run")
+            raise ArtifactCompatibilityError(
+                "ReNoise artifact guidance scale does not match this run"
+            )
+        self._validate_context(context)
 
     def create_denoising_hook(self, artifact: InversionArtifact) -> DenoisingHook:
         return _ReNoiseHook(artifact)
@@ -331,9 +341,7 @@ class ReNoiseInversion(InversionMethod):
         if not isinstance(image, Image.Image):
             raise TypeError("Dataset source_img must be a Pillow image")
         scheduler_config = self._validate_context(context)
-        if self._settings is None:
-            self._settings = _ReNoiseSettings.load(_SETTINGS_PATH)
-
+        settings = self._inversion_settings()
         # Discovery and artifact replay never import Diffusers or read settings.
         from diffusers import DDIMScheduler
 
@@ -352,7 +360,7 @@ class ReNoiseInversion(InversionMethod):
             pipeline.maybe_free_model_hooks()
             for timestep, a, b in coefficients:
                 latent = self._renoise_step(
-                    latent, timestep, a, b, embeddings, self._settings, context
+                    latent, timestep, a, b, embeddings, settings, context
                 )
             artifact = InversionArtifact(
                 method_id=self.method_id,

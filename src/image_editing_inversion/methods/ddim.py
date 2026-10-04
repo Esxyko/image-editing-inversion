@@ -19,6 +19,9 @@ class DDIMInversion(InversionMethod):
     def method_id(self) -> str:
         return "ddim"
 
+    def inversion_cache_parameters(self, context: InversionContext) -> Mapping[str, Any]:
+        return {}
+
     @torch.inference_mode()
     def invert(
         self, sample: Mapping[str, Any], context: InversionContext

@@ -84,7 +84,8 @@ dataset loading, `artifacts` for `InversionArtifact`, `methods` for adapter and
 hook APIs, and `experiments` for `ExperimentRunner`, `edit_artifacts`, and
 `run_methods`. Configuration and editing APIs remain exported from `config`
 and `editing`. External adapters must update moved imports; there are no
-compatibility wrappers. Saved artifacts and run formats are unchanged.
+compatibility wrappers. Saved artifacts retain their portable format; sweep
+outputs are grouped by pipeline parameter filename as described below.
 
 ## Shared editing framework
 
@@ -95,15 +96,15 @@ produce a reconstruction
 with `source_prompt` and an edit with `target_prompt`. The dataset mask is reserved
 for later metrics; it is not used to constrain the edit.
 
-Install the project with `uv sync`, then select a YAML config file for each run.
-The checked-in [`config/experiment.yaml`](config/experiment.yaml) is a starting
-point. Its four required sections supply the model, sampling, editing, and
-runtime settings; an optional `methods` section supplies adapter settings:
+Install the project with `uv sync`, then edit [`config.yaml`](config.yaml) and
+the YAML files in [`pipeline_h_params/`](pipeline_h_params/). Run commands from
+the project root. Shared configuration is always loaded from `config.yaml` in
+the working directory. Its four required sections supply shared settings;
+an optional `methods` section supplies adapter settings:
 
 - `model` selects the SD 1.5 checkpoint, revision, and image dimensions.
-- `sampling` selects the DDIM step count, eta, guidance scale, and seed.
-- `prompt_to_prompt` selects the edit mode and the cross- and self-attention
-  replacement fractions. `auto` uses replacement when source and target captions
+- `sampling` selects DDIM eta and the editing seed.
+- `prompt_to_prompt` selects the edit mode. `auto` uses replacement when source and target captions
   have the same number of whitespace-separated words, and refinement otherwise.
 - Optional `methods.<method_id>.prompt_to_prompt` supplies additional settings
   validated by that method's P2P subclass; it does not override the shared mode
@@ -118,7 +119,80 @@ Increase the batch size only when GPU memory permits; a batch of `N` edits has
 keep the batch size at one and consider `cpu_offload: model` or
 `cpu_offload: sequential` and a smaller `attention_query_chunk_size`. An
 unsupported device or option combination fails before model loading. A run saves its resolved
-configuration in `resolved-config.json`.
+configuration in each parameter file's `resolved-config.json`.
+
+### Pipeline parameter files and artifact reuse
+
+Each file in `pipeline_h_params/` must define these four settings, using the
+same grouping as [`pipeline_h_params/default.yaml`](pipeline_h_params/default.yaml):
+
+```yaml
+sampling:
+  num_inference_steps: 50
+  guidance_scale: 7.5
+prompt_to_prompt:
+  cross_replace_fraction: 0.4
+  self_replace_fraction: 0.6
+```
+
+Steps must be a positive integer, guidance must be finite and nonnegative,
+and both fractions must be between 0 and 1. All four values are required;
+unknown keys and definitions of these settings in `config.yaml` are rejected.
+The resolved Python settings still use `config.sampling` and
+`config.prompt_to_prompt`. Use `load_config("default.yaml")` to resolve one file.
+
+Both commands accept `--pipeline-h-params FILENAME` to select one YAML file:
+
+```powershell
+uv run image-editing-inversion run `
+  --method ddim `
+  --uid your-dataset-uid `
+  --pipeline-h-params default.yaml `
+  --output data/runs
+```
+
+Omit this option to process every top-level `.yaml` or `.yml` file in filename
+order, completing all requested methods and samples for one file before the
+next. Missing, empty, or malformed parameter files fail before model loading.
+The dataset and loaded model are shared across the sweep; scheduler timesteps
+and resolved settings are updated for each file. An invocation returns one
+parent run directory:
+
+```text
+data/runs/<run-id>/
+|-- sweep.json
+`-- default.yaml/
+    |-- resolved-config.json
+    |-- results.jsonl
+    `-- images/<sample-id>/
+        |-- reconstructed.png
+        `-- edited.png
+```
+
+Generated inversions are stored independently in `data/artifacts/`, with a
+`catalog.json` index and unique directories containing `artifact.json` and
+`tensors.safetensors`. Repeated runs consult this catalog even when `--output`
+changes. Matching includes dataset identity/UID, model and scheduler settings,
+guidance, effective method hyperparameters, numerical runtime settings, and
+implementation/dependency fingerprints. File checksums and replay validation
+protect against damaged entries; a missing or damaged artifact is recomputed
+without deleting its old files. A malformed catalog fails clearly. Catalog
+updates assume one active writer and publish complete artifacts before indexing
+them.
+
+Changing only attention fractions or editing policies reuses inversion. The
+bundled deterministic methods also reuse inversion when the editing seed
+changes. Changing steps, guidance, or effective inversion settings creates a
+new artifact. Method hyperparameters are loaded for cache matching using the
+same validated settings as inversion. Each run generates its images again.
+Result records include the parameter filename, artifact path, and
+`artifact_reused`; cache hits have `inversion_seconds: 0.0`.
+
+An `edit-artifact` sweep records incompatible artifact/file pairs as `skipped`
+with a reason and continues with compatible pairs. Malformed artifacts and
+operational failures stop execution. If every pair is skipped, the command
+returns a nonzero exit status. Explicit replay continues to support existing
+uncataloged artifacts and does not read method hyperparameter files.
 
 ### Run baseline DDIM inversion
 
@@ -132,14 +206,13 @@ rejects dynamic thresholding or incompatible inverse schedules.
 
 ```powershell
 uv run image-editing-inversion run `
-  --config config/experiment.yaml `
   --method ddim `
   --uid your-dataset-uid `
   --output data/runs
 ```
 
-The runner saves the terminal latent and provenance in the existing artifact
-format, then produces `reconstructed.png` and `edited.png` with the shared
+The runner saves or reuses the terminal latent and provenance through the
+artifact catalog, then produces `reconstructed.png` and `edited.png` with the shared
 Prompt-to-Prompt policy. DDIM artifacts have no per-step state and need no
 denoising hook. Inversion processes one sample at a time; reconstruction and
 editing use `runtime.batch_size`. Saved DDIM artifacts can be replayed with
@@ -166,7 +239,7 @@ fixed. Each step starts from the previous step's optimized embedding.
 Run from the project root so the adapter can find
 [`method_h_params/Null_text.yaml`](method_h_params/Null_text.yaml). This file is
 resolved relative to the working directory and loaded on the adapter's first
-inversion; its validated settings are cached for that adapter instance. Missing
+inversion or cache lookup; its validated settings are cached for that adapter instance. Missing
 or malformed files fail clearly. Omitted keys use the defaults below, and unknown
 keys are rejected. Optimization settings do not change the experiment YAML.
 
@@ -195,7 +268,6 @@ To compare all four bundled methods on the same sample and shared settings:
 
 ```powershell
 uv run image-editing-inversion run `
-  --config config/experiment.yaml `
   --method ddim `
   --method null-text `
   --method direct-inversion `
@@ -231,7 +303,6 @@ It performs no optimization and needs no method hyperparameter file.
 
 ```powershell
 uv run image-editing-inversion run `
-  --config config/experiment.yaml `
   --method direct-inversion `
   --uid your-dataset-uid `
   --output data/runs
@@ -277,7 +348,7 @@ one final inverse update; UNet inputs use the configured runtime precision.
 
 Run from the project root so the adapter can find
 [`method_h_params/ReNoise.yaml`](method_h_params/ReNoise.yaml). The file is loaded
-on the adapter's first inversion and its validated settings are cached for that
+on the adapter's first inversion or cache lookup and its validated settings are cached for that
 instance. Missing or malformed files fail clearly, unknown keys are rejected,
 and omitted keys use these defaults:
 
@@ -299,7 +370,6 @@ These settings are independent of the shared experiment YAML.
 
 ```powershell
 uv run image-editing-inversion run `
-  --config config/experiment.yaml `
   --method renoise `
   --uid your-dataset-uid `
   --output data/runs
@@ -349,7 +419,7 @@ from image_editing_inversion.data import load_project_dataset
 from image_editing_inversion.editing import Editor
 
 records = load_project_dataset()
-config = load_config("config/experiment.yaml")
+config = load_config("default.yaml")
 editor = Editor(config)
 sample = records[0]
 # z_t is a [1, 4, 64, 64] tensor produced by an inversion implementation.
@@ -366,7 +436,7 @@ artifact = InversionArtifact(
     timesteps=editor.expected_timesteps,
     terminal_latent=z_t,
 )
-artifact.save("data/inversions/example")
+artifact.save("data/artifacts/external-example")
 ```
 
 Before replay, install an `InversionMethod` adapter registered as
@@ -375,8 +445,8 @@ The artifact format itself has not changed.
 
 ```powershell
 uv run image-editing-inversion edit-artifact `
-  --config config/experiment.yaml `
-  --artifact data/inversions/example `
+  --artifact data/artifacts/external-example `
+  --pipeline-h-params default.yaml `
   --output data/runs
 ```
 
@@ -384,7 +454,8 @@ Repeat `--artifact` to edit several samples. The default uses the private Hub
 dataset loader described above. `--dataset-path` can select a separately saved
 local dataset; artifacts made for that path use `local:image-editing` as their
 dataset reference. Hub artifacts use the repository ID. The dataset fingerprint
-must also match. Results are written under a new run directory with `results.jsonl`,
+must also match. Results are written under a new parent run directory with a
+`sweep.json` manifest, and a child per parameter filename containing `results.jsonl`,
 `resolved-config.json`, and `edited.png`/`reconstructed.png` per sample. Run
 records contain UIDs and artifact paths, not prompts, source images, or masks.
 
@@ -409,6 +480,17 @@ Override the optional `validate_replay(artifact, context)` to check method-speci
 state or configuration before the runner creates that hook; the default does
 nothing. Direct editor callers should invoke this validation themselves before
 creating a method's hook.
+Raise `ArtifactCompatibilityError` from `image_editing_inversion.artifacts`
+for configuration mismatches that replay sweeps can skip; keep malformed-state
+errors as ordinary exceptions.
+
+Automatic artifact reuse is opt-in for external adapters. Override
+`inversion_cache_parameters(context)` and return a JSON-compatible mapping of
+effective inversion settings, including any additional inputs that can change
+inversion (such as a stochastic method's seed or versions of helper modules).
+The default returns `None`, so artifacts are saved centrally without automatic
+reuse. All four bundled adapters opt in; Null-text and ReNoise expose the same
+resolved settings used by inversion. Explicit replay does not call this method.
 Hooks receive source/target latents and text embeddings before and after each
 denoising step. Install the method through the
 `image_editing_inversion.methods` Python entry-point group. Published inversion
@@ -484,7 +566,6 @@ adapter for every artifact's method ID.
 
 ```powershell
 uv run image-editing-inversion run `
-  --config config/experiment.yaml `
   --method your-method-id `
   --uid your-dataset-uid `
   --output data/runs
@@ -492,6 +573,7 @@ uv run image-editing-inversion run `
 
 Repeat `--method` or `--uid` for a comparison. The bundled `ddim`, `null-text`,
 `direct-inversion`, and `renoise` methods are available after installing the project;
-other method IDs require registered adapters. All methods in one run use the
-same model, sampling, shared Prompt-to-Prompt, and runtime configuration. Both commands
-require `--config`, so separate runs can select different YAML files.
+other method IDs require registered adapters. All methods for a given parameter
+file use the same model, sampling, shared Prompt-to-Prompt, and runtime configuration. Both commands
+read `config.yaml` from the working directory; `--pipeline-h-params` selects a
+pipeline parameter filename, and omitting it sweeps all parameter files.

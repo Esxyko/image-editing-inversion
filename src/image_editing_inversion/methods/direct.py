@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Mapping
 from PIL import Image
 import torch
 
-from ..artifacts import InversionArtifact
+from ..artifacts import ArtifactCompatibilityError, InversionArtifact
 from .base import InversionMethod
 from .context import InversionContext
 from .hooks import DenoisingHook, DenoisingStepState
@@ -123,6 +123,9 @@ class DirectInversion(InversionMethod):
     def method_id(self) -> str:
         return "direct-inversion"
 
+    def inversion_cache_parameters(self, context: InversionContext) -> Mapping[str, Any]:
+        return {}
+
     @staticmethod
     def _validate_context(context: InversionContext) -> dict[str, Any]:
         config = context.config
@@ -142,20 +145,22 @@ class DirectInversion(InversionMethod):
     def validate_replay(
         self, artifact: InversionArtifact, context: InversionContext
     ) -> None:
-        scheduler_config = self._validate_context(context)
+        _, guidance_scale = _artifact_state(artifact)
         artifact.validate_compatibility(
             context.config,
             dataset_ref=context.dataset_ref,
             dataset_fingerprint=context.dataset_fingerprint,
             timesteps=context.editor.expected_timesteps,
-            scheduler_config=scheduler_config,
+            scheduler_config=context.editor.scheduler_config,
         )
-        _, guidance_scale = _artifact_state(artifact)
         if not math.isclose(
             guidance_scale, context.config.sampling.guidance_scale,
             rel_tol=0, abs_tol=1e-9,
         ):
-            raise ValueError("Direct inversion artifact guidance scale does not match this run")
+            raise ArtifactCompatibilityError(
+                "Direct inversion artifact guidance scale does not match this run"
+            )
+        self._validate_context(context)
 
     def create_denoising_hook(self, artifact: InversionArtifact) -> DenoisingHook:
         return _DirectInversionHook(artifact)

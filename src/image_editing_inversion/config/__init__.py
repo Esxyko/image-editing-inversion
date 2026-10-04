@@ -1,6 +1,6 @@
 """Public configuration types and YAML loader."""
 
-from .loader import load_config
+from .loader import discover_pipeline_h_params, load_config
 from .models import (
     ConfigError,
     ExperimentConfig,
@@ -19,5 +19,6 @@ __all__ = [
     "PromptToPromptConfig",
     "RuntimeConfig",
     "SamplingConfig",
+    "discover_pipeline_h_params",
     "load_config",
 ]

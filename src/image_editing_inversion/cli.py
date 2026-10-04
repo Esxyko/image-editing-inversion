@@ -8,17 +8,16 @@ from typing import Sequence
 
 def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
-        "--config",
-        type=Path,
-        required=True,
-        help="Experiment YAML file, such as config/experiment.yaml.",
-    )
-    parser.add_argument(
         "--dataset-path",
         type=Path,
         help="Local Hugging Face Dataset directory; otherwise use the project Hub loader.",
     )
     parser.add_argument("--output", type=Path, required=True, help="Output directory.")
+    parser.add_argument(
+        "--pipeline-h-params",
+        type=Path,
+        help="YAML filename inside pipeline_h_params/; otherwise run every file sequentially.",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,11 +56,13 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "edit-artifact":
             run_dir = edit_artifacts(
-                args.config, args.dataset_path, args.artifact, args.output
+                args.dataset_path, args.artifact, args.output,
+                pipeline_h_params_file=args.pipeline_h_params,
             )
         else:
             run_dir = run_methods(
-                args.config, args.dataset_path, args.method, args.uid, args.output
+                args.dataset_path, args.method, args.uid, args.output,
+                pipeline_h_params_file=args.pipeline_h_params,
             )
     except (ImportError, OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
         print(f"error: {exc}", file=sys.stderr)

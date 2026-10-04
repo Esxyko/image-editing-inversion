@@ -42,6 +42,17 @@ class InversionMethod(ABC):
     ) -> None:
         """Optionally reject method-specific state incompatible with this run."""
 
+    def inversion_cache_parameters(
+        self, context: InversionContext
+    ) -> Mapping[str, Any] | None:
+        """Opt into reuse with effective inversion settings; None disables caching.
+
+        Include any extra inputs affecting inversion, including the seed for
+        stochastic methods. Shared model/scheduler/guidance inputs are supplied
+        by the runner. Replay does not call this method.
+        """
+        return None
+
     def create_denoising_hook(
         self, artifact: InversionArtifact
     ) -> DenoisingHook | None:

@@ -6,7 +6,7 @@ embeddings are optimized; the shared model and conditional caption stay fixed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
@@ -16,7 +16,7 @@ import torch
 import torch.nn.functional as functional
 import yaml
 
-from ..artifacts import InversionArtifact
+from ..artifacts import ArtifactCompatibilityError, InversionArtifact
 from ..config import ConfigError
 from .base import InversionMethod
 from .context import InversionContext
@@ -164,6 +164,14 @@ class NullTextInversion(InversionMethod):
     def method_id(self) -> str:
         return "null-text"
 
+    def _inversion_settings(self) -> _NullTextSettings:
+        if self._settings is None:
+            self._settings = _NullTextSettings.load(_SETTINGS_PATH)
+        return self._settings
+
+    def inversion_cache_parameters(self, context: InversionContext) -> Mapping[str, Any]:
+        return asdict(self._inversion_settings())
+
     @staticmethod
     def _validate_context(context: InversionContext) -> dict[str, Any]:
         config = context.config
@@ -190,15 +198,22 @@ class NullTextInversion(InversionMethod):
     def validate_replay(
         self, artifact: InversionArtifact, context: InversionContext
     ) -> None:
-        scheduler_config = self._validate_context(context)
+        embeddings, guidance_scale = _artifact_state(artifact)
         artifact.validate_compatibility(
             context.config,
             dataset_ref=context.dataset_ref,
             dataset_fingerprint=context.dataset_fingerprint,
             timesteps=context.editor.expected_timesteps,
-            scheduler_config=scheduler_config,
+            scheduler_config=context.editor.scheduler_config,
         )
-        embeddings, guidance_scale = _artifact_state(artifact)
+        if not math.isclose(
+            guidance_scale, context.config.sampling.guidance_scale,
+            rel_tol=0, abs_tol=1e-9,
+        ):
+            raise ArtifactCompatibilityError(
+                "Null-text artifact guidance scale does not match this run"
+            )
+        self._validate_context(context)
         pipeline = context.editor.pipeline
         expected_shape = (
             len(artifact.timesteps), 1,
@@ -209,13 +224,6 @@ class NullTextInversion(InversionMethod):
             raise ValueError(
                 f"Null-text replay expected embedding shape {expected_shape}, "
                 f"got {tuple(embeddings.shape)}"
-            )
-        if not math.isclose(
-            guidance_scale, context.config.sampling.guidance_scale,
-            rel_tol=0, abs_tol=1e-9,
-        ):
-            raise ValueError(
-                "Null-text artifact guidance scale does not match this run"
             )
 
     def create_denoising_hook(self, artifact: InversionArtifact) -> DenoisingHook:
@@ -355,8 +363,7 @@ class NullTextInversion(InversionMethod):
                 "Null-text inversion does not support sequential CPU offload; "
                 "use runtime.cpu_offload='none' or 'model'"
             )
-        if self._settings is None:
-            self._settings = _NullTextSettings.load(_SETTINGS_PATH)
+        settings = self._inversion_settings()
 
         # Import only during inversion so entry-point discovery stays lightweight.
         from diffusers import DDIMInverseScheduler
@@ -396,7 +403,7 @@ class NullTextInversion(InversionMethod):
             # Whole-model offload keeps the UNet resident until explicit cleanup.
             # Do not call another pipeline component or offload it during backward.
             optimized = self._optimize(
-                pivots, unconditional, conditional, self._settings, context
+                pivots, unconditional, conditional, settings, context
             )
             artifact = InversionArtifact(
                 method_id=self.method_id,

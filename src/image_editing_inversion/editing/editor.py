@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 from diffusers.models.attention_processor import AttnProcessor, AttnProcessor2_0
 import torch
 
-from ..artifacts import InversionArtifact
+from ..artifacts import InversionArtifact, normalize_scheduler_config
 from ..config import ExperimentConfig
 from ..methods.hooks import DenoisingHook, DenoisingStepState
 from .processor import _PromptToPromptProcessor
@@ -31,6 +30,14 @@ class Editor:
         self.dtype = self._runtime.dtype
         self._pipeline = self._runtime.pipeline
 
+    def reconfigure(self, config: ExperimentConfig) -> None:
+        """Apply the next parameter file without loading model weights again."""
+        self._runtime.reconfigure(config)
+        self.config = config
+
+    def inversion_cache_settings(self) -> dict[str, Any]:
+        return self._runtime.inversion_cache_settings()
+
     @property
     def pipeline(self) -> StableDiffusionPipeline:
         return self._pipeline
@@ -45,7 +52,7 @@ class Editor:
 
     @property
     def scheduler_config(self) -> dict[str, Any]:
-        return json.loads(json.dumps(dict(self.scheduler.config), allow_nan=False))
+        return normalize_scheduler_config(self.scheduler.config)
 
     def validate_artifact(self, artifact: InversionArtifact) -> None:
         artifact.validate_compatibility(

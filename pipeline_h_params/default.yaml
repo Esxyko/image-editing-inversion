@@ -1,0 +1,8 @@
+# Pipeline settings shared by every method in this parameter-file run.
+sampling:
+  num_inference_steps: 50
+  guidance_scale: 7.5
+
+prompt_to_prompt:
+  cross_replace_fraction: 0.4
+  self_replace_fraction: 0.6
