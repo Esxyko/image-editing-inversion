@@ -18,7 +18,7 @@ Each image has a floating `artifacts/<i>/terminal_latent` tensor of shape
 `artifacts/<i>/state/<name>` tensors have one entry per timestep and are interpreted
 by the registered method's hook. Images, captions, and masks stay in the dataset.
 
-Each schema-v5 file embeds JSON-encoded `ids` and aligned `entries` lists in its
+Each schema-v1 file embeds JSON-encoded `ids` and aligned `entries` lists in its
 safetensors metadata. `entries[i]` indexes a production record in the JSON-encoded
 `contexts` list for `ids[i]`. Common production records are stored once, while
 every UID retains its own source association.
@@ -62,8 +62,8 @@ Catalog updates assume one active writer. A failure between file publication and
 catalog publication can leave an uncataloged file available for explicit replay;
 stale cache entries will miss and require recomputation.
 
-Only schema-v5 group files and catalog-v2 entries with cache identity version 2
-are reusable. Schema-v4 files and older cache identities require regeneration;
+Only current schema-v1 group files and catalog-v2 entries with cache identity version 2
+are reusable. Previous artifact formats (including schema v5) and older cache identities require regeneration;
 `diffuse` treats them as misses and replaces them only after successful publication. Legacy
 per-sample directories, hash-named groups, and catalog-v1 entries are ignored
 without deletion. The old catalog is replaced only after successful new-format
@@ -181,7 +181,7 @@ Method helpers own guidance/scheduler checks and artifact construction. `Inversi
 Workflows supply a `SharedInversionComponents(IntermediateCache())` provider;
 direct method calls without a provider compute locally. Cache reads and shared
 computations produce detached ordinary tensors suitable for Null-text autograd.
-Old schema-v4 artifacts require regeneration; new schema-v5 entries preserve
+Previous artifact formats require regeneration; current schema-v1 entries preserve
 production identity across group merges. Code changes do not automatically
 invalidate caches; remove affected cache entries when recomputation is needed.
 
@@ -255,7 +255,9 @@ these settings automatically. The coordinator fills missing provenance on
 new adapter results, so existing adapters do not need to change their return
 constructors. Standalone artifact producers should supply provenance themselves
 when their files will be loaded by a workflow.
-Legacy schema-v1/v2/v3/v4 artifacts are no longer readable; regenerate with `diffuse`.
+The current collection format resets `schema_version` to `1` while retaining
+the indexed tensors and production metadata. Previous formats, including the
+original schema-v1 layout and schema v2/v3/v4/v5, require regeneration with `diffuse`.
 `InversionArtifact.validate_terminal_latent()` checks shape, floating dtype,
 positive spatial dimensions, and finite values. Construction, staged serialization,
 and editing validation share this check without loading an entire collection's
@@ -311,7 +313,7 @@ print(reference.sample_uid)  # Pass this raw UID to edit_artifacts; cache inputs
 
 Before replay, install an `InversionMethod` adapter registered as
 `external-ddim`, even if it uses the default P2P behavior and no denoising hook.
-New collections use schema v5 with the aligned IDs embedded in safetensors.
+New collections use schema v1 with the aligned IDs embedded in safetensors.
 
 ```python
 from image_editing_inversion.workflows import edit_artifacts
@@ -322,7 +324,7 @@ print(run_dir)
 
 The optional `artifact_id` argument accepts a raw dataset sample UID. Every matching
 position across method/settings groups is replayed. Call `edit_artifacts()` without
-an ID to replay every published schema-v5 collection, including uncached entries,
+an ID to replay every published schema-v1 collection, including uncached entries,
 in relative group-path order followed by positional order. Hidden staging files,
 legacy layouts, and symlinks are excluded. Malformed collections, missing IDs,
 and an empty artifact repository produce clear errors. Replay batches are flushed

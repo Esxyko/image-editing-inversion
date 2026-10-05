@@ -72,7 +72,7 @@ def _production_metadata(ids: Sequence[str], entries: Sequence[dict[str, Any]]) 
             contexts.append(context)
         references.append(indices[canonical])
     return {
-        "schema_version": "5", "ids": json.dumps(list(ids)),
+        "schema_version": "1", "ids": json.dumps(list(ids)),
         "entries": json.dumps(references), "contexts": json.dumps(contexts, allow_nan=False),
     }
 
@@ -83,8 +83,8 @@ def _inspect(path: Path, steps: int) -> tuple[tuple[str, ...], tuple[tuple[str, 
         header, _ = _read_header(path)
         with safe_open(str(path), framework="pt", device="cpu") as saved:
             metadata = saved.metadata()
-            if not metadata or metadata.get("schema_version") != "5":
-                raise ValueError("Unsupported inversion artifact schema; regenerate with diffuse for schema v5")
+            if not metadata or metadata.get("schema_version") != "1":
+                raise ValueError("Unsupported inversion artifact schema; regenerate with diffuse for schema v1")
             if set(metadata) != {"schema_version", "ids", "entries", "contexts"}:
                 raise ValueError("Collection metadata must contain schema_version, ids, entries, and contexts")
             ids = json.loads(metadata["ids"])
@@ -229,7 +229,7 @@ class ArtifactCollection:
         headers = {}
         source_keys = {}
         output: dict[str, Any] = {
-            "__metadata__": {"schema_version": "5", "ids": json.dumps(ids)},
+            "__metadata__": {"schema_version": "1", "ids": json.dumps(ids)},
         }
         entries = []
         payloads = []

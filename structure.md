@@ -35,7 +35,7 @@ Configuration and storage locations are fixed relative to `src/`.
     |-- artifacts/
     |   |-- inversion.py            # Per-image state and compatibility
     |   |-- layout.py               # Canonical published group parsing
-    |   |-- collection.py           # Indexed schema-v5 safetensors and streaming
+    |   |-- collection.py           # Indexed schema-v1 safetensors and streaming
     |   |-- catalog.py              # Cache catalog and group publication
     |   `-- repository.py, intermediates.py # Discovery and component storage
     |-- inversion/
@@ -119,7 +119,7 @@ data/                               # Ignored by Git
 |   |-- catalog.json                # Schema v2
 |   `-- <method>/steps-N_guidance-G/
 |       |-- h-params.json
-|       `-- artifacts.safetensors   # Schema v5, ordered IDs and production metadata
+|       `-- artifacts.safetensors   # Schema v1, ordered IDs and production metadata
 `-- output/<run-id>/
     |-- sweep.json                  # Schema v2
     `-- <parameter-file>/<method>/

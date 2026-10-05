@@ -34,7 +34,7 @@ class ArtifactRepository:
         references = tuple(reference for collection in self._collections()
                            for reference in collection.references)
         if not references:
-            raise ValueError(f"No schema-v5 inversion artifact collections found in {self.root}.")
+            raise ValueError(f"No schema-v1 inversion artifact collections found in {self.root}.")
         return references
 
     def _collections(self) -> Iterator[ArtifactCollection]:
