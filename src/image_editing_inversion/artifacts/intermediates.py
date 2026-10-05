@@ -13,6 +13,7 @@ import torch
 from safetensors import SafetensorError, safe_open
 from safetensors.torch import save_file
 
+from .._project import project_paths
 
 TensorSpecs = Mapping[str, tuple[tuple[int, ...], torch.dtype]]
 
@@ -38,8 +39,8 @@ class IntermediateCache:
     memory is required. As with final artifacts, publication assumes one writer.
     """
 
-    def __init__(self, root: Path = Path("data/cache/inversion")) -> None:
-        self.root = root.expanduser().resolve()
+    def __init__(self) -> None:
+        self.root = project_paths().intermediates.resolve()
 
     def _path(self, component: str, inputs: Mapping[str, Any]) -> Path:
         if re.fullmatch(r"[a-z][a-z0-9_]*", component) is None:

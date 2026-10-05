@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Iterator
 
+from .._project import project_paths
 from .collection import ArtifactCollection, ArtifactReference
 from .layout import is_pipeline_group, method_directory_name
 
@@ -10,8 +11,8 @@ from .layout import is_pipeline_group, method_directory_name
 class ArtifactRepository:
     """Select published artifacts without modifying storage or the catalog."""
 
-    def __init__(self, root: Path = Path("data/artifacts")) -> None:
-        self.root = root.expanduser().resolve()
+    def __init__(self) -> None:
+        self.root = project_paths().artifacts.resolve()
 
     def resolve(self, artifact_id: str) -> ArtifactReference:
         matches = self.resolve_all(artifact_id)

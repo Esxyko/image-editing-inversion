@@ -2,30 +2,24 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any, Mapping
 
-from datasets import Dataset, load_from_disk
+from datasets import Dataset
 
 from .identity import DatasetContentIdentity
-from .loader import PROJECT_DATA_DIR, load_project_dataset
-from .schema import HUB_DATASET_REF, LOCAL_DATASET_REF, REQUIRED_COLUMNS
+from .._project import project_paths
+from .loader import load_project_dataset
+from .schema import HUB_DATASET_REF, REQUIRED_COLUMNS
 
 
 class DatasetRepository:
     """Own one dataset's selection, identity, and UID index."""
 
-    def __init__(self, dataset_path: Path | None) -> None:
-        if dataset_path is None:
-            self.dataset = load_project_dataset()
-            resolved_path = PROJECT_DATA_DIR
-            self.dataset_ref = HUB_DATASET_REF
-            self.dataset_location = HUB_DATASET_REF
-        else:
-            resolved_path = dataset_path.expanduser().resolve()
-            self.dataset = load_from_disk(str(resolved_path))
-            self.dataset_ref = LOCAL_DATASET_REF
-            self.dataset_location = resolved_path.as_posix()
+    def __init__(self) -> None:
+        resolved_path = project_paths().data
+        self.dataset = load_project_dataset()
+        self.dataset_ref = HUB_DATASET_REF
+        self.dataset_location = HUB_DATASET_REF
         if not isinstance(self.dataset, Dataset):
             raise ValueError("The dataset source must contain one Hugging Face Dataset.")
         if set(self.dataset.column_names) != REQUIRED_COLUMNS:
@@ -34,6 +28,8 @@ class DatasetRepository:
         if not self.dataset_fingerprint:
             raise ValueError("The dataset has no fingerprint for artifact validation.")
         uids = self.dataset["uid"]
+        if any(not isinstance(uid, str) or not uid.strip() for uid in uids):
+            raise ValueError("The dataset contains invalid UIDs.")
         self._uid_to_index = {uid: index for index, uid in enumerate(uids)}
         if len(self._uid_to_index) != len(uids):
             raise ValueError("The dataset contains duplicate UIDs.")

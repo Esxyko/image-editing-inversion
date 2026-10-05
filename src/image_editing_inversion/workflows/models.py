@@ -49,16 +49,20 @@ class WorkItem:
     inversion: InversionRecord | None = None
 
     def result_values(self) -> dict[str, Any]:
-        loaded = self.prepared.loaded
-        timing = self.inversion
-        return {
-            "uid": loaded.artifact.sample_uid,
-            "method_id": loaded.artifact.method_id,
-            "artifact": str(loaded.reference.path),
-            "artifact_index": loaded.reference.index,
-            "artifact_reused": True if timing is None else timing.artifact_reused,
-            "inversion_seconds": None if timing is None else timing.inversion_seconds,
-            "inversion_batch_seconds": None if timing is None else timing.inversion_batch_seconds,
-            "inversion_batch_size": None if timing is None else timing.inversion_batch_size,
-            "inversion_batch_id": None if timing is None else timing.batch_id,
-        }
+        return reference_values(self.prepared.loaded.reference, self.inversion)
+
+
+def reference_values(
+    reference: ArtifactReference, inversion: InversionRecord | None = None,
+) -> dict[str, Any]:
+    return {
+        "uid": reference.sample_uid,
+        "method_id": reference.group.method_id,
+        "artifact": str(reference.path),
+        "artifact_index": reference.index,
+        "artifact_reused": True if inversion is None else inversion.artifact_reused,
+        "inversion_batch_id": None if inversion is None else inversion.batch_id,
+        "inversion_seconds": None if inversion is None else inversion.inversion_seconds,
+        "inversion_batch_seconds": None if inversion is None else inversion.inversion_batch_seconds,
+        "inversion_batch_size": None if inversion is None else inversion.inversion_batch_size,
+    }

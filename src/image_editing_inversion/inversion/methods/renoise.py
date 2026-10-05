@@ -18,16 +18,18 @@ from ...artifacts import InversionArtifact
 from ...config import ConfigError, ExperimentConfig
 from ..base import InversionMethod
 from ..context import InversionContext
+from ..components import prepare_sources
 from ..validation import validate_sampling
 from ..hooks import DenoisingHook, DenoisingStepState
 from .common import (
-    GUIDANCE_KEY as _GUIDANCE_KEY, build_artifact, guidance_state, prepare_sources,
+    model_execution,
+    GUIDANCE_KEY as _GUIDANCE_KEY, build_artifact, guidance_state,
     require_finite, validate_ddim_scheduler,
     validate_guidance_compatibility, validate_guidance_state,
 )
 
 
-_SETTINGS_PATH = Path("method_h_params/ReNoise.yaml")
+_SETTINGS_FILENAME = "ReNoise.yaml"
 _LOW_TIMESTEP_BOUNDARY = 250
 
 
@@ -152,13 +154,13 @@ class ReNoiseInversion(InversionMethod):
     def method_id(self) -> str:
         return "renoise"
 
-    def _inversion_settings(self) -> _ReNoiseSettings:
+    def _inversion_settings(self, config: ExperimentConfig) -> _ReNoiseSettings:
         if self._settings is None:
-            self._settings = _ReNoiseSettings.load(_SETTINGS_PATH)
+            self._settings = _ReNoiseSettings.load(config.project.method_h_params / _SETTINGS_FILENAME)
         return self._settings
 
     def inversion_cache_parameters(self, context: InversionContext) -> Mapping[str, Any]:
-        settings = self._inversion_settings()
+        settings = self._inversion_settings(context.config)
         # Cache effective predictions, not unused windows or caps. Predictions
         # after the averaging window cannot change the selected final average.
         schedule = []
@@ -170,7 +172,7 @@ class ReNoiseInversion(InversionMethod):
 
     def validate_inversion_config(self, config: ExperimentConfig) -> None:
         validate_sampling(config, "ReNoise")
-        self._inversion_settings()
+        self._inversion_settings(config)
 
     def validate_inversion_context(self, context: InversionContext) -> None:
         self._prepare_coefficients(context)
@@ -317,10 +319,10 @@ class ReNoiseInversion(InversionMethod):
         uids, prompts, images = self._validate_batch(samples, context)
         self.validate_inversion_config(context.config)
         coefficients = self._prepare_coefficients(context)
-        settings = self._inversion_settings()
+        settings = self._inversion_settings(context.config)
         editor = context.editor
         pipeline = editor.pipeline
-        try:
+        with model_execution(pipeline):
             pipeline.maybe_free_model_hooks()
             sources = prepare_sources(uids, prompts, images, context, "ReNoise")
             latent, embeddings = sources.latent, sources.embeddings
@@ -337,5 +339,3 @@ class ReNoiseInversion(InversionMethod):
                 self.validate_replay(artifact, context)
                 artifacts.append(artifact)
             return artifacts
-        finally:
-            pipeline.maybe_free_model_hooks()

@@ -20,11 +20,13 @@ from ...artifacts import InversionArtifact
 from ...config import ConfigError, ExperimentConfig
 from ..base import InversionMethod
 from ..context import InversionContext
+from ..components import prepare_sources, conditional_pivots
 from ..validation import inverse_scheduler as _inverse_scheduler, validate_sampling
 from ..hooks import DenoisingHook, DenoisingStepState
 from .common import (
-    GUIDANCE_KEY as _GUIDANCE_KEY, build_artifact, conditional_pivots, guidance_state,
-    prepare_sources, require_finite, validate_ddim_scheduler,
+    model_execution,
+    GUIDANCE_KEY as _GUIDANCE_KEY, build_artifact, guidance_state,
+    require_finite, validate_ddim_scheduler,
     validate_guidance_compatibility, validate_guidance_state,
 )
 
@@ -32,7 +34,7 @@ if TYPE_CHECKING:
     from diffusers import DDIMInverseScheduler
 
 
-_SETTINGS_PATH = Path("method_h_params/Null_text.yaml")
+_SETTINGS_FILENAME = "Null_text.yaml"
 _EMBEDDINGS_KEY = "null_text_embeddings"
 _require_finite = partial(require_finite, label="Null-text")
 
@@ -153,13 +155,13 @@ class NullTextInversion(InversionMethod):
     def method_id(self) -> str:
         return "null-text"
 
-    def _inversion_settings(self) -> _NullTextSettings:
+    def _inversion_settings(self, config: ExperimentConfig) -> _NullTextSettings:
         if self._settings is None:
-            self._settings = _NullTextSettings.load(_SETTINGS_PATH)
+            self._settings = _NullTextSettings.load(config.project.method_h_params / _SETTINGS_FILENAME)
         return self._settings
 
     def inversion_cache_parameters(self, context: InversionContext) -> Mapping[str, Any]:
-        settings = self._inversion_settings()
+        settings = self._inversion_settings(context.config)
         return {
             "num_inner_steps": settings.num_inner_steps,
             "learning_rate": settings.learning_rate,
@@ -174,7 +176,7 @@ class NullTextInversion(InversionMethod):
                 "Null-text inversion does not support sequential CPU offload; "
                 "use runtime.cpu_offload='none' or 'model'"
             )
-        self._inversion_settings()
+        self._inversion_settings(config)
 
     def validate_inversion_context(self, context: InversionContext) -> None:
         self._prepare_inverse_scheduler(context)
@@ -336,7 +338,7 @@ class NullTextInversion(InversionMethod):
         uids, prompts, images = self._validate_batch(samples, context)
         self.validate_inversion_config(context.config)
         inverse_scheduler = self._prepare_inverse_scheduler(context)
-        settings = self._inversion_settings()
+        settings = self._inversion_settings(context.config)
 
         editor = context.editor
 
@@ -345,7 +347,10 @@ class NullTextInversion(InversionMethod):
             (parameter, parameter.requires_grad)
             for parameter in pipeline.unet.parameters()
         ]
-        try:
+        with model_execution(pipeline, restorations=[
+            partial(parameter.requires_grad_, requires_grad)
+            for parameter, requires_grad in parameter_flags
+        ]):
             pipeline.maybe_free_model_hooks()
             for parameter, _ in parameter_flags:
                 parameter.requires_grad_(False)
@@ -366,7 +371,3 @@ class NullTextInversion(InversionMethod):
                 self.validate_replay(artifact, context)
                 artifacts.append(artifact)
             return artifacts
-        finally:
-            for parameter, requires_grad in parameter_flags:
-                parameter.requires_grad_(requires_grad)
-            pipeline.maybe_free_model_hooks()

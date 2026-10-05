@@ -1,7 +1,11 @@
 """Shared names for method and pipeline-parameter artifact directories."""
 
+from __future__ import annotations
+
 import math
 import re
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Mapping
 
 
@@ -56,3 +60,23 @@ def is_pipeline_group(name: str) -> bool:
         return True
     except (ValueError, OverflowError):
         return False
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactGroup:
+    """Validated method and sampling parameters of a published collection."""
+
+    method_id: str
+    num_inference_steps: int
+    guidance_scale: float
+
+    @classmethod
+    def from_path(cls, path: Path) -> ArtifactGroup:
+        if path.name != "artifacts.safetensors":
+            raise ValueError("Published collections must use artifacts.safetensors")
+        method_id = method_directory_name(path.parent.parent.name)
+        return cls(method_id=method_id, **pipeline_group_parameters(path.parent.name))
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {"num_inference_steps": self.num_inference_steps, "guidance_scale": self.guidance_scale}

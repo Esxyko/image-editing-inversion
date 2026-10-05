@@ -10,8 +10,9 @@ from ...artifacts import InversionArtifact
 from ...config import ExperimentConfig
 from ..base import InversionMethod
 from ..context import InversionContext
+from ..components import prepare_sources
 from ..validation import inverse_scheduler as _inverse_scheduler, validate_sampling
-from .common import build_artifact, prepare_sources
+from .common import build_artifact, model_execution
 
 
 if TYPE_CHECKING:
@@ -58,7 +59,7 @@ class DDIMInversion(InversionMethod):
         config = context.config
 
         pipeline = editor.pipeline
-        try:
+        with model_execution(pipeline):
             # Manual model calls need the same offload cleanup as pipeline calls.
             pipeline.maybe_free_model_hooks()
             sources = prepare_sources(uids, prompts, images, context, "DDIM")
@@ -86,5 +87,3 @@ class DDIMInversion(InversionMethod):
                 editor.validate_artifact(artifact)
                 artifacts.append(artifact)
             return artifacts
-        finally:
-            pipeline.maybe_free_model_hooks()

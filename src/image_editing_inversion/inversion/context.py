@@ -9,7 +9,7 @@ from ..config import ExperimentConfig
 
 if TYPE_CHECKING:
     from ..generation import Editor
-    from .methods.common import SharedInversionComponents
+    from .components import SharedInversionComponents
 
 
 @dataclass(frozen=True, slots=True)

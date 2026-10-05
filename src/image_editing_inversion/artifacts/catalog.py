@@ -10,9 +10,10 @@ from tempfile import TemporaryDirectory
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
+from .._project import project_paths
 from .collection import ArtifactCollection, ArtifactReference
 from .inversion import ArtifactSettings, InversionArtifact
-from .layout import method_directory_name, pipeline_group_name, pipeline_group_parameters
+from .layout import ArtifactGroup, method_directory_name, pipeline_group_name, pipeline_group_parameters
 
 
 _DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -40,8 +41,8 @@ def _file_digest(path: Path) -> str:
 class ArtifactCatalog:
     """Own a schema-v2 cache catalog; publication assumes one active writer."""
 
-    def __init__(self, root: Path = Path("data/artifacts")) -> None:
-        self.root = root.expanduser().resolve()
+    def __init__(self) -> None:
+        self.root = project_paths().artifacts.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.path = self.root / "catalog.json"
         self._entries: dict[str, dict[str, Any]] = {}
@@ -78,7 +79,7 @@ class ArtifactCatalog:
             path = self._artifact_path(entry["artifact"])
             ArtifactReference(path, entry["index"], entry["sample_uid"])
             if (_key(inputs) != key or inputs.get("sample_uid") != entry["sample_uid"]
-                    or inputs.get("method_id") != path.parent.parent.name
+                    or inputs.get("method_id") != ArtifactGroup.from_path(path).method_id
                     or entry["artifact"] not in data["groups"]):
                 raise ValueError(f"Artifact catalog entry identity mismatch for {key!r}")
             position = (entry["artifact"], entry["index"])
@@ -98,11 +99,10 @@ class ArtifactCatalog:
             raise ValueError("Artifact file must use method/steps-N_guidance-G/artifacts.safetensors")
         if relative != "/".join(parts):
             raise ValueError("Artifact paths must use canonical relative forward-slash paths")
-        method_directory_name(parts[0])
-        pipeline_group_parameters(parts[1])
         path = (self.root / relative).resolve()
         if self.root not in path.parents or path != self.root / relative:
             raise ValueError("Artifact file must stay inside the catalog root without redirects")
+        ArtifactGroup.from_path(path)
         return path
 
     def _write(self) -> None:

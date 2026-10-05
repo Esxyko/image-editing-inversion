@@ -23,6 +23,9 @@ class InversionCoordinator:
     def __init__(self, catalog: ArtifactCatalog, replay: ReplayPreparer) -> None:
         self._catalog = catalog
         self._replay = replay
+        self._identity_context: InversionContext | None = None
+        self._identity_method: InversionMethod | None = None
+        self._identity_inputs: dict[str, Any] | None = None
 
     def group(self, method: InversionMethod, context: InversionContext) -> ArtifactGroupPublication:
         return self._catalog.group(method.method_id, pipeline_h_params={
@@ -33,15 +36,19 @@ class InversionCoordinator:
     def cache_inputs(
         self, method: InversionMethod, uid: str, context: InversionContext,
     ) -> dict[str, Any] | None:
+        if self._identity_context is context and self._identity_method is method:
+            return None if self._identity_inputs is None else {**self._identity_inputs, "sample_uid": uid}
         parameters = method.inversion_cache_parameters(context)
         if parameters is None:
+            self._identity_context = context
+            self._identity_method = method
+            self._identity_inputs = None
             return None
         if not isinstance(parameters, Mapping):
             raise TypeError("inversion_cache_parameters must return a mapping or None")
         inputs = {
             "cache_version": 2,
             **context.source_identity(),
-            "sample_uid": uid,
             "method_id": method.method_id,
             "scheduler": {
                 "id": "ddim", "config": context.editor.scheduler_config,
@@ -51,7 +58,10 @@ class InversionCoordinator:
             "guidance_scale": context.config.sampling.guidance_scale,
             "method_parameters": dict(parameters),
         }
-        return json.loads(json.dumps(inputs, sort_keys=True, allow_nan=False))
+        self._identity_inputs = json.loads(json.dumps(inputs, sort_keys=True, allow_nan=False))
+        self._identity_context = context
+        self._identity_method = method
+        return {**self._identity_inputs, "sample_uid": uid}
 
     def validate(
         self, artifact: InversionArtifact, method: InversionMethod,
@@ -107,14 +117,14 @@ class InversionCoordinator:
                         resolved.append(reference)
                     timing.extra.update(cache_hits=len(resolved) - len(missing), uncached_count=len(missing))
             except Exception as exc:
-                output.record({
+                output.record_error({
                     "uid": uid, "artifact": None, "artifact_index": None,
                     "artifact_reused": False,
                     "inversion_batch_id": timing.batch_id,
                     "inversion_seconds": time.perf_counter() - started,
                     "inversion_batch_seconds": None, "inversion_batch_size": 0,
                     "status": "error", "error": str(exc),
-                })
+                }, exc)
                 raise
 
         if missing:
@@ -124,11 +134,11 @@ class InversionCoordinator:
                     samples = read_samples(missing_uids)
             except Exception as exc:
                 for uid in missing_uids:
-                    output.record({
+                    output.record_error({
                         "uid": uid, "artifact": None, "artifact_index": None,
                         "artifact_reused": False, "inversion_batch_id": timing.batch_id,
                         "status": "error", "error": str(exc),
-                    })
+                    }, exc)
                 raise
 
         started = time.perf_counter()
@@ -166,7 +176,7 @@ class InversionCoordinator:
             batch_seconds = time.perf_counter() - started
             for index in missing or range(len(uids)):
                 previous = resolved[index]
-                output.record({
+                output.record_error({
                     "uid": uids[index],
                     "artifact": str(previous.path) if isinstance(previous, ArtifactReference) else None,
                     "artifact_index": previous.index if isinstance(previous, ArtifactReference) else None,
@@ -176,7 +186,7 @@ class InversionCoordinator:
                     "inversion_batch_seconds": batch_seconds if missing else 0.0,
                     "inversion_batch_size": len(missing),
                     "status": "error", "error": str(exc),
-                })
+                }, exc)
             raise
         missed = set(missing)
         return [InversionRecord(
@@ -197,9 +207,9 @@ class InversionCoordinator:
                 with timing.measure("publication"):
                     publication.publish()
             except Exception as exc:
-                output.record({
+                output.record_error({
                     "uid": None, "artifact": str(publication.path), "artifact_index": None,
                     "status": "error", "error": str(exc),
-                })
+                }, exc)
                 raise
             self._replay.invalidate(publication.path)

@@ -27,7 +27,7 @@ class ModelRuntime:
             "float32": torch.float32,
             "bfloat16": torch.bfloat16,
         }[config.runtime.dtype]
-        model_path = Path(config.model.model_id).expanduser()
+        model_path = config.project.model_path(config.model.model_id)
         commit = None
         if not model_path.is_dir():
             model_path = Path(StableDiffusionPipeline.download(

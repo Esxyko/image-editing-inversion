@@ -12,19 +12,19 @@ from ..artifacts import (
     ArtifactCollection, ArtifactCompatibilityError, ArtifactReference,
     ArtifactSettings, InversionArtifact,
 )
-from ..artifacts.layout import pipeline_group_parameters
 from ..config import ExperimentConfig
 from ..data import DatasetRepository
 from ..generation import PromptToPrompt
-from ..inversion import DenoisingHook, InversionContext, InversionMethod, get_method
+from ..inversion import DenoisingHook, InversionContext, InversionMethod
 from .models import LoadedArtifact, LoadResult, PreparedEdit
 
 
 class ReplayPreparer:
     """Own collection reads, dataset identity, policy selection, and hook preparation."""
 
-    def __init__(self, repository: DatasetRepository) -> None:
+    def __init__(self, repository: DatasetRepository, methods: Mapping[str, InversionMethod]) -> None:
         self._repository = repository
+        self._methods = dict(methods)
         self._collections: dict[Path, tuple[tuple[int, ...], ArtifactCollection]] = {}
         self._lock = Lock()
 
@@ -55,10 +55,9 @@ class ReplayPreparer:
             artifact.dataset_ref, artifact.dataset_fingerprint, artifact.sample_uid
         )
 
-    @staticmethod
-    def method_for(artifact: InversionArtifact) -> InversionMethod:
+    def method_for(self, artifact: InversionArtifact) -> InversionMethod:
         try:
-            return get_method(artifact.method_id)
+            return self._methods[artifact.method_id]
         except KeyError as exc:
             raise ValueError(
                 f"Artifact method {artifact.method_id!r} is not registered; "
@@ -110,7 +109,7 @@ class ReplayPreparer:
         self, artifact: InversionArtifact, method: InversionMethod, context: InversionContext,
     ) -> None:
         self.check_identity(artifact)
-        artifact.validate_terminal_latent()
+        artifact.validate()
         if artifact.provenance is not None:
             for name, expected in (
                 ("model_content", context.editor.model_content_identity),
@@ -132,7 +131,7 @@ class ReplayPreparer:
         self.check_batch_size(method, context.config)
         policy_class, settings = self.policy_for(method, context.config)
         self.validate(loaded.artifact, method, context)
-        parameters = pipeline_group_parameters(loaded.reference.path.parent.name)
+        parameters = loaded.reference.group.parameters
         if not math.isclose(
             parameters["guidance_scale"], context.config.sampling.guidance_scale,
             rel_tol=0, abs_tol=1e-9,

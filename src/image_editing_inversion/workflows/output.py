@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Mapping, Sequence
 from uuid import uuid4
 
+from .._project import project_paths
 from ..artifacts.layout import method_directory_name
 from ..config import ExperimentConfig
 from .timing import BatchTiming
@@ -19,19 +20,26 @@ if TYPE_CHECKING:
 
 def _write_json(path: Path, values: Mapping[str, Any]) -> None:
     temporary = path.with_name(f".{path.name}-{uuid4().hex}.tmp")
-    temporary.write_text(
-        json.dumps(dict(values), indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
-    temporary.replace(path)
+    try:
+        temporary.write_text(
+            json.dumps(dict(values), indent=2, sort_keys=True, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        temporary.replace(path)
+    except BaseException as exc:
+        try:
+            temporary.unlink(missing_ok=True)
+        except BaseException as cleanup:
+            exc.add_note(f"Temporary output cleanup failed: {cleanup}")
+        raise
 
 
 class SweepOutput:
     """Own one invocation's directory and parameter/method manifest."""
 
-    def __init__(self, output_root: Path, parameter_files: Sequence[Path]) -> None:
+    def __init__(self, parameter_files: Sequence[Path]) -> None:
         run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
-        self.output_dir = output_root.expanduser().resolve() / run_id
+        self.output_dir = project_paths().output.resolve() / run_id
         self.output_dir.mkdir(parents=True, exist_ok=False)
         self._manifest: dict[str, Any] = {
             "schema_version": 2,
@@ -47,6 +55,28 @@ class SweepOutput:
 
     def _write(self) -> None:
         _write_json(self.output_dir / "sweep.json", self._manifest)
+
+    @property
+    def status(self) -> str:
+        return self._manifest["status"]
+
+    def fail(
+        self, error: str, *, filename: str | None = None, method_id: str | None = None,
+    ) -> None:
+        """Finalize affected pending/running combinations after a setup failure."""
+        for parameter in self._manifest["parameter_files"]:
+            if filename is not None and parameter["pipeline_h_params_file"] != filename:
+                continue
+            affected = False
+            for method in parameter["methods"]:
+                if method_id is not None and method["method_id"] != method_id:
+                    continue
+                if method["status"] in {"pending", "running"}:
+                    method.update(status="error", error=error)
+                    affected = True
+            if affected:
+                parameter.update(status="error", error=error)
+        self.finish("error", error)
 
     def set_methods(self, method_ids: Sequence[str]) -> None:
         """Declare every combination before any method starts running."""
@@ -149,6 +179,13 @@ class RunOutput:
         status = record.get("status")
         if status in self.counts:
             self.counts[status] += 1
+
+    def record_error(self, values: Mapping[str, Any], error: BaseException) -> None:
+        """Attempt an error record without replacing the failure being reported."""
+        try:
+            self.record({**values, "status": "error", "error": str(error)})
+        except BaseException as recording:
+            error.add_note(f"Could not record result for {values.get('uid')!r}: {recording}")
 
     @contextmanager
     def batch(self, phase: str, sample_count: int) -> Iterator[BatchTiming]:

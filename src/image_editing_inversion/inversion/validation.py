@@ -9,6 +9,7 @@ from ..config import ExperimentConfig
 from .context import InversionContext
 
 if TYPE_CHECKING:
+    import torch
     from diffusers import DDIMInverseScheduler
 
 
@@ -39,3 +40,8 @@ def inverse_scheduler(context: InversionContext, label: str) -> DDIMInverseSched
     if timesteps != tuple(reversed(editor.expected_timesteps)):
         raise ValueError(f"{label} inverse timesteps must reverse the editor's schedule")
     return scheduler
+
+
+def require_finite(tensor: torch.Tensor, name: str, label: str) -> None:
+    if not torch.isfinite(tensor).all().item():
+        raise ValueError(f"{label} inversion produced non-finite {name}")

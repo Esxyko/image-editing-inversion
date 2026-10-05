@@ -16,11 +16,13 @@ from ...artifacts import InversionArtifact
 from ...config import ExperimentConfig
 from ..base import InversionMethod
 from ..context import InversionContext
+from ..components import prepare_sources, conditional_pivots
 from ..validation import inverse_scheduler as _inverse_scheduler, validate_sampling
 from ..hooks import DenoisingHook, DenoisingStepState
 from .common import (
-    GUIDANCE_KEY as _GUIDANCE_KEY, build_artifact, conditional_pivots, guidance_state,
-    prepare_sources, require_finite, validate_ddim_scheduler,
+    model_execution,
+    GUIDANCE_KEY as _GUIDANCE_KEY, build_artifact, guidance_state,
+    require_finite, validate_ddim_scheduler,
     validate_guidance_compatibility, validate_guidance_state,
 )
 
@@ -188,7 +190,7 @@ class DirectInversion(InversionMethod):
         editor = context.editor
 
         pipeline = editor.pipeline
-        try:
+        with model_execution(pipeline):
             pipeline.maybe_free_model_hooks()
             sources = prepare_sources(uids, prompts, images, context, "Direct")
             embeddings = sources.embeddings
@@ -203,5 +205,3 @@ class DirectInversion(InversionMethod):
                 self.validate_replay(artifact, context)
                 artifacts.append(artifact)
             return artifacts
-        finally:
-            pipeline.maybe_free_model_hooks()

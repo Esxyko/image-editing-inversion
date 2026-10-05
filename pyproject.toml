@@ -1,7 +1,7 @@
 [project]
 name = "image-editing-inversion"
 version = "0.1.0"
-description = "Add your description here"
+description = "Compare image inversion methods with a shared Stable Diffusion and Prompt-to-Prompt editor"
 readme = "README.md"
 authors = [
     { name = "CIA", email = "2ndaryuan@gmail.com" }

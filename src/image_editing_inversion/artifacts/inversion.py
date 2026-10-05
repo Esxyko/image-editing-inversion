@@ -169,8 +169,13 @@ class InversionArtifact:
         if not math.isfinite(self.eta) or self.eta < 0:
             raise ValueError("eta must be a finite non-negative number")
         self.timesteps = _timesteps_tuple(self.timesteps)
+        self.validate()
+
+    def validate(self) -> None:
+        """Validate current metadata and tensors without normalizing or mutating them."""
         if self.provenance is not None and not isinstance(self.provenance, ArtifactProvenance):
             raise TypeError("Artifact provenance must be ArtifactProvenance or None")
+        self.validate_metadata(self.metadata())
         self.validate_terminal_latent()
         if not isinstance(self.per_step_state, Mapping):
             raise ValueError("per_step_state must be a mapping")
@@ -245,20 +250,27 @@ class InversionArtifact:
             value["provenance"] = asdict(ArtifactProvenance(**provenance))
         return value
 
-    def validate_settings(self, settings: ArtifactSettings, *, steps: int) -> None:
-        """Check saved identity against independently supplied current inputs."""
+    def _production_mismatches(self, expected: Mapping[str, Any]) -> list[str]:
         mismatches = []
-        for name, expected in (
-            ("model_id", settings.model_id), ("model_revision", settings.model_revision),
-            ("dataset_ref", settings.dataset_ref), ("dataset_fingerprint", settings.dataset_fingerprint),
-            ("scheduler_id", settings.scheduler_id),
-            ("scheduler_config", normalize_scheduler_config(settings.scheduler_config)),
-            ("timesteps", _timesteps_tuple(settings.timesteps_for_steps(steps))),
-        ):
-            if getattr(self, name) != expected:
+        for name, value in expected.items():
+            actual = getattr(self, name)
+            if name == "eta":
+                matches = math.isclose(actual, value, rel_tol=0, abs_tol=1e-9)
+            else:
+                matches = actual == value
+            if not matches:
                 mismatches.append(name)
-        if not math.isclose(self.eta, settings.eta, rel_tol=0, abs_tol=1e-9):
-            mismatches.append("eta")
+        return mismatches
+
+    def validate_settings(self, settings: ArtifactSettings, *, steps: int) -> None:
+        """Compare saved production inputs with independently supplied expectations."""
+        mismatches = self._production_mismatches({
+            "model_id": settings.model_id, "model_revision": settings.model_revision,
+            "dataset_ref": settings.dataset_ref, "dataset_fingerprint": settings.dataset_fingerprint,
+            "scheduler_id": settings.scheduler_id,
+            "scheduler_config": normalize_scheduler_config(settings.scheduler_config),
+            "timesteps": _timesteps_tuple(settings.timesteps_for_steps(steps)), "eta": settings.eta,
+        })
         for name in ("model_content", "dataset_content", "numerics"):
             expected = getattr(settings, name)
             if expected is not None and (self.provenance is None or getattr(self.provenance, name) != expected):
@@ -267,46 +279,24 @@ class InversionArtifact:
             raise ArtifactCompatibilityError("Saved artifact inputs differ from this run: " + ", ".join(mismatches))
 
     def validate_compatibility(
-        self,
-        config: Any,
-        *,
-        dataset_ref: str,
-        dataset_fingerprint: str | None,
+        self, config: Any, *, dataset_ref: str, dataset_fingerprint: str | None,
         timesteps: Sequence[int] | torch.Tensor,
         scheduler_config: Mapping[str, Any] | None = None,
     ) -> None:
-        """Reject an artifact that does not match a resolved editing run.
-
-        ``timesteps`` must come from the actual scheduler, not just its step
-        count. Pass ``scheduler_config`` when the editor has constructed its
-        scheduler to also compare the complete scheduler configuration.
-        """
-        mismatches: list[str] = []
-        if self.model_id != config.model.model_id:
-            mismatches.append("model ID")
-        if self.model_revision != config.model.revision:
-            mismatches.append("model revision")
-        if self.dataset_ref != dataset_ref:
-            mismatches.append("dataset reference")
-        if self.dataset_fingerprint != dataset_fingerprint:
-            mismatches.append("dataset fingerprint")
-        if self.scheduler_id != "ddim":
-            mismatches.append("scheduler type")
+        """Compare against the active denoising schedule and latent resolution."""
+        expected = {
+            "model_id": config.model.model_id, "model_revision": config.model.revision,
+            "dataset_ref": dataset_ref, "dataset_fingerprint": dataset_fingerprint,
+            "scheduler_id": "ddim", "eta": config.sampling.eta,
+            "timesteps": _timesteps_tuple(timesteps),
+        }
+        if scheduler_config is not None:
+            expected["scheduler_config"] = normalize_scheduler_config(scheduler_config)
+        mismatches = self._production_mismatches(expected)
         if len(self.timesteps) != config.sampling.num_inference_steps:
             mismatches.append("step count")
-        if not math.isclose(self.eta, config.sampling.eta, rel_tol=0, abs_tol=1e-9):
-            mismatches.append("DDIM eta")
-        if self.timesteps != _timesteps_tuple(timesteps):
-            mismatches.append("timestep schedule")
-        if scheduler_config is not None and self.scheduler_config != normalize_scheduler_config(
-            scheduler_config
-        ):
-            mismatches.append("scheduler configuration")
         expected_shape = (1, 4, config.model.height // 8, config.model.width // 8)
         if tuple(self.terminal_latent.shape) != expected_shape:
             mismatches.append("latent resolution")
         if mismatches:
-            raise ArtifactCompatibilityError(
-                "Inversion artifact is incompatible with this run: "
-                + ", ".join(mismatches)
-            )
+            raise ArtifactCompatibilityError("Inversion artifact is incompatible with this run: " + ", ".join(mismatches))

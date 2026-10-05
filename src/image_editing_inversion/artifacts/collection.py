@@ -14,7 +14,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 from .inversion import ArtifactCompatibilityError, ArtifactProvenance, ArtifactSettings, InversionArtifact
-from .layout import method_directory_name, pipeline_group_parameters
+from .layout import ArtifactGroup
 
 
 _FILENAME = "artifacts.safetensors"
@@ -36,6 +36,11 @@ class ArtifactReference:
             raise ValueError("Artifact index must be a non-negative integer")
         if not isinstance(self.sample_uid, str) or not self.sample_uid.strip():
             raise ValueError("Artifact sample UID must be a non-empty string")
+
+    @property
+    def group(self) -> ArtifactGroup:
+        """Interpret a published reference's canonical group location."""
+        return ArtifactGroup.from_path(self.path)
 
 
 def _read_header(path: Path) -> tuple[dict[str, Any], int]:
@@ -117,7 +122,7 @@ def _inspect(path: Path, steps: int) -> tuple[tuple[str, ...], tuple[tuple[str, 
                 if match[2] == "terminal_latent":
                     dtype = header[key]["dtype"]
                     floating = dtype in {"F16", "BF16", "F32", "F64"} or dtype.startswith("F8")
-                    if len(shape) != 4 or shape[:2] != [1, 4] or not floating:
+                    if len(shape) != 4 or shape[:2] != [1, 4] or min(shape[2:]) < 1 or not floating:
                         raise ValueError(f"Invalid terminal latent at position {index}")
                     terminals.add(index)
                 elif not shape or shape[0] != steps:
@@ -142,8 +147,9 @@ class ArtifactCollection:
         self.path = Path(path).expanduser().resolve()
         if self.path.name != self.filename:
             raise ValueError(f"Artifact collection filename must be {self.filename}")
-        self.method_id = method_directory_name(self.path.parent.parent.name)
-        self.parameters = pipeline_group_parameters(self.path.parent.name)
+        group = ArtifactGroup.from_path(self.path)
+        self.method_id = group.method_id
+        self.parameters = group.parameters
         self.ids, self._keys, self._entries = _inspect(self.path, self.parameters["num_inference_steps"])
         if any(entry["method_id"] != self.method_id for entry in self._entries):
             raise ValueError("Saved artifact methods do not match their collection directory")
@@ -204,7 +210,7 @@ class ArtifactCollection:
             raise ValueError("A staged batch must contain unique artifact IDs")
         tensors = {}
         for index, artifact in enumerate(artifacts):
-            artifact.__post_init__()
+            artifact.validate()
             values = {"terminal_latent": artifact.terminal_latent}
             values.update({f"state/{key}": tensor for key, tensor in artifact.per_step_state.items()})
             tensors.update({f"artifacts/{index}/{key}": tensor.detach().cpu().contiguous().clone()
