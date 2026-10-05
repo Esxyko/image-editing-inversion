@@ -15,8 +15,8 @@ wheels/
 .env.*
 !.env.example
 
-# Downloaded datasets
-/data/
+# Processed datasets
+/data/processed/
 
 # Local dataset-building archive
 archive
