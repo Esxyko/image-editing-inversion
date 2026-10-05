@@ -11,7 +11,8 @@ from .schema import HUB_DATASET_REF, REQUIRED_COLUMNS
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
-_DATA_DIR = _PROJECT_ROOT / "data"
+PROJECT_DATA_DIR = _PROJECT_ROOT / "data"
+_DATA_DIR = PROJECT_DATA_DIR
 
 
 def load_project_dataset() -> Dataset:
@@ -64,6 +65,8 @@ def load_project_dataset() -> Dataset:
 
         try:
             dataset.save_to_disk(str(_DATA_DIR))
+            # Use the same saved shards on the first and subsequent runs.
+            dataset = load_from_disk(str(_DATA_DIR))
         except Exception as exc:
             raise RuntimeError(
                 f"Could not save the dataset to {_DATA_DIR}. The local artifact "

@@ -1,15 +1,17 @@
-"""Persist sweep manifests, parameter-file snapshots, images, and records."""
+"""Persist sweep manifests and per-parameter/method snapshots, images, and records."""
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import UTC, datetime
-import hashlib
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Iterator, Mapping, Sequence
 from uuid import uuid4
 
+from ..artifacts.layout import method_directory_name
 from ..config import ExperimentConfig
+from .timing import BatchTiming
 
 if TYPE_CHECKING:
     from PIL import Image
@@ -25,18 +27,19 @@ def _write_json(path: Path, values: Mapping[str, Any]) -> None:
 
 
 class SweepOutput:
-    """Own one invocation's parent directory and parameter-file manifest."""
+    """Own one invocation's directory and parameter/method manifest."""
 
     def __init__(self, output_root: Path, parameter_files: Sequence[Path]) -> None:
         run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
         self.output_dir = output_root.expanduser().resolve() / run_id
         self.output_dir.mkdir(parents=True, exist_ok=False)
         self._manifest: dict[str, Any] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "status": "pending",
             "parameter_files": [
                 {"pipeline_h_params_file": path.name, "directory": path.name,
-                 "status": "pending", "counts": {"ok": 0, "skipped": 0, "error": 0}}
+                 "status": "pending", "counts": {"ok": 0, "skipped": 0, "error": 0},
+                 "methods": []}
                 for path in parameter_files
             ],
         }
@@ -44,6 +47,36 @@ class SweepOutput:
 
     def _write(self) -> None:
         _write_json(self.output_dir / "sweep.json", self._manifest)
+
+    def set_methods(self, method_ids: Sequence[str]) -> None:
+        """Declare every combination before any method starts running."""
+        names = [method_directory_name(method_id) for method_id in method_ids]
+        for entry in self._manifest["parameter_files"]:
+            entry["methods"] = [
+                {"method_id": method_id,
+                 "directory": (Path(entry["directory"]) / method_id).as_posix(),
+                 "status": "pending", "counts": {"ok": 0, "skipped": 0, "error": 0}}
+                for method_id in names
+            ]
+        self._write()
+
+    def update_method(
+        self, filename: str, method_id: str, status: str,
+        counts: Mapping[str, int], error: str | None = None,
+    ) -> None:
+        parameter = next(item for item in self._manifest["parameter_files"]
+                         if item["pipeline_h_params_file"] == filename)
+        entry = next(item for item in parameter["methods"] if item["method_id"] == method_id)
+        entry.update(status=status, counts=dict(counts))
+        if error is not None:
+            entry["error"] = error
+        parameter["counts"] = {
+            key: sum(item["counts"][key] for item in parameter["methods"])
+            for key in ("ok", "skipped", "error")
+        }
+        parameter["status"] = "running"
+        self._manifest["status"] = "running"
+        self._write()
 
     def update(
         self, filename: str, status: str, counts: Mapping[str, int], error: str | None = None
@@ -64,7 +97,7 @@ class SweepOutput:
 
 
 class RunOutput:
-    """Own snapshots, images, and records for one parameter-file child."""
+    """Own snapshots, images, and records for one parameter/method combination."""
 
     def __init__(
         self,
@@ -74,19 +107,24 @@ class RunOutput:
         dataset_fingerprint: str,
         dataset_location: str,
         pipeline_h_params_file: Path,
+        method_id: str,
     ) -> None:
         self.dataset_ref = dataset_ref
         self.dataset_fingerprint = dataset_fingerprint
         self.dataset_location = dataset_location
         self.pipeline_h_params_file = pipeline_h_params_file.name
+        self.method_id = method_directory_name(method_id)
         self.counts = {"ok": 0, "skipped": 0, "error": 0}
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=False)
         self.results_path = self.output_dir / "results.jsonl"
         self.results_path.touch(exist_ok=False)
+        self.batches_path = self.output_dir / "batches.jsonl"
+        self.batches_path.touch(exist_ok=False)
         snapshot = {
             "config": config.to_dict(),
             "pipeline_h_params_file": self.pipeline_h_params_file,
+            "method_id": self.method_id,
             "dataset_ref": self.dataset_ref,
             "dataset_fingerprint": self.dataset_fingerprint,
             "dataset_location": self.dataset_location,
@@ -94,11 +132,16 @@ class RunOutput:
         _write_json(self.output_dir / "resolved-config.json", snapshot)
 
     def record(self, values: Mapping[str, Any]) -> None:
+        if values.get("method_id", self.method_id) != self.method_id:
+            raise ValueError("Result method must match its output directory")
         record = {
             "dataset_ref": self.dataset_ref,
             "dataset_fingerprint": self.dataset_fingerprint,
             "settings_file": "resolved-config.json",
             "pipeline_h_params_file": self.pipeline_h_params_file,
+            "method_id": self.method_id,
+            "inversion_batch_id": None,
+            "edit_batch_id": None,
             **values,
         }
         with self.results_path.open("a", encoding="utf-8") as stream:
@@ -107,20 +150,45 @@ class RunOutput:
         if status in self.counts:
             self.counts[status] += 1
 
+    @contextmanager
+    def batch(self, phase: str, sample_count: int) -> Iterator[BatchTiming]:
+        """Persist each attempted batch once without changing sample counts."""
+        timing = BatchTiming(phase, sample_count)
+        try:
+            yield timing
+        except BaseException as exc:
+            try:
+                self.record_batch(timing.values(exc))
+            except BaseException as recording:
+                exc.add_note(f"Could not record batch timing: {recording}")
+            raise
+        else:
+            self.record_batch(timing.values())
+
+    def record_batch(self, values: Mapping[str, Any]) -> None:
+        record = {
+            "method_id": self.method_id,
+            "pipeline_h_params_file": self.pipeline_h_params_file,
+            **values,
+        }
+        with self.batches_path.open("a", encoding="utf-8") as stream:
+            stream.write(json.dumps(record, sort_keys=True, allow_nan=False) + "\n")
+
     @staticmethod
-    def _sample_name(method_id: str, uid: str, ordinal: int) -> str:
-        digest = hashlib.sha256(f"{method_id}\0{uid}".encode("utf-8")).hexdigest()[:12]
-        return f"{ordinal:06d}-{digest}"
+    def _sample_name(uid: str) -> str:
+        """Use the project UID with colons replaced for Windows paths."""
+        return uid.replace(":", "_")
 
     def save_images(
         self,
         method_id: str,
         uid: str,
-        ordinal: int,
         reconstructed: Image.Image,
         edited: Image.Image,
     ) -> tuple[Path, Path]:
-        image_dir = self.output_dir / "images" / self._sample_name(method_id, uid, ordinal)
+        if method_id != self.method_id:
+            raise ValueError("Image method must match its output directory")
+        image_dir = self.output_dir / "images" / self._sample_name(uid)
         image_dir.mkdir(parents=True, exist_ok=False)
         reconstructed_path = image_dir / "reconstructed.png"
         edited_path = image_dir / "edited.png"

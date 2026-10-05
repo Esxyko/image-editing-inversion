@@ -7,41 +7,30 @@ https://github.com/cure-lab/PnPInversion
 from __future__ import annotations
 
 from dataclasses import replace
-import math
-from typing import TYPE_CHECKING, Any, Mapping
+from functools import partial
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
-from PIL import Image
 import torch
 
-from ...artifacts import ArtifactCompatibilityError, InversionArtifact
+from ...artifacts import InversionArtifact
+from ...config import ExperimentConfig
 from ..base import InversionMethod
 from ..context import InversionContext
+from ..validation import inverse_scheduler as _inverse_scheduler, validate_sampling
 from ..hooks import DenoisingHook, DenoisingStepState
+from .common import (
+    GUIDANCE_KEY as _GUIDANCE_KEY, build_artifact, conditional_pivots, guidance_state,
+    prepare_sources, require_finite, validate_ddim_scheduler,
+    validate_guidance_compatibility, validate_guidance_state,
+)
 
 if TYPE_CHECKING:
     from diffusers import DDIMInverseScheduler
 
 
 _OFFSETS_KEY = "direct_inversion_offsets"
-_GUIDANCE_KEY = "guidance_scale"
-
-
-def _require_finite(tensor: torch.Tensor, name: str) -> None:
-    if not torch.isfinite(tensor).all().item():
-        raise ValueError(f"Direct inversion produced non-finite {name}")
-
-
-def _validate_scheduler(scheduler_config: Mapping[str, Any]) -> None:
-    for name, required in (
-        ("prediction_type", "epsilon"),
-        ("timestep_spacing", "leading"),
-        ("clip_sample", False),
-        ("thresholding", False),
-    ):
-        if scheduler_config.get(name) != required:
-            raise ValueError(
-                f"Direct inversion requires DDIM {name} == {required!r}"
-            )
+_require_finite = partial(require_finite, label="Direct")
+_validate_scheduler = partial(validate_ddim_scheduler, label="Direct")
 
 
 def _artifact_state(artifact: InversionArtifact) -> tuple[torch.Tensor, float]:
@@ -69,21 +58,9 @@ def _artifact_state(artifact: InversionArtifact) -> tuple[torch.Tensor, float]:
             "Direct inversion offsets must be floating tensors of shape "
             "[timesteps, 1, 4, latent_height, latent_width] matching the terminal latent"
         )
-    guidance = artifact.per_step_state[_GUIDANCE_KEY]
-    if (
-        not isinstance(guidance, torch.Tensor)
-        or not guidance.is_floating_point()
-        or tuple(guidance.shape) != (len(artifact.timesteps),)
-    ):
-        raise ValueError(
-            "Direct inversion guidance_scale must be a floating [timesteps] tensor"
-        )
     _require_finite(artifact.terminal_latent, "terminal latent")
     _require_finite(offsets, "saved offsets")
-    _require_finite(guidance, "saved guidance scale")
-    scale = float(guidance[0].item())
-    if scale < 0 or not torch.all(guidance == guidance[0]).item():
-        raise ValueError("Direct inversion guidance_scale must be constant and nonnegative")
+    scale = validate_guidance_state(artifact, "Direct inversion")
     return offsets, scale
 
 
@@ -117,7 +94,7 @@ class _DirectInversionHook(DenoisingHook):
 
 
 class DirectInversion(InversionMethod):
-    """Invert one sample and record its per-step source reconstruction residuals."""
+    """Invert source batches and record each image's reconstruction residuals."""
 
     @property
     def method_id(self) -> str:
@@ -126,18 +103,22 @@ class DirectInversion(InversionMethod):
     def inversion_cache_parameters(self, context: InversionContext) -> Mapping[str, Any]:
         return {}
 
+    def validate_inversion_config(self, config: ExperimentConfig) -> None:
+        validate_sampling(config, "Direct")
+
+    def validate_inversion_context(self, context: InversionContext) -> None:
+        self._prepare_inverse_scheduler(context)
+
+    def _prepare_inverse_scheduler(self, context: InversionContext) -> DDIMInverseScheduler:
+        self._validate_context(context)
+        return _inverse_scheduler(context, "Direct")
+
     @staticmethod
     def _validate_context(context: InversionContext) -> dict[str, Any]:
         config = context.config
         if config != context.editor.config:
             raise ValueError("Direct inversion context must use the editor's configuration")
-        if config.sampling.eta != 0:
-            raise ValueError("Direct inversion requires sampling.eta == 0")
-        scale = config.sampling.guidance_scale
-        if not math.isfinite(scale) or scale < 0:
-            raise ValueError(
-                "Direct inversion requires finite, nonnegative sampling.guidance_scale"
-            )
+        validate_sampling(config, "Direct")
         scheduler_config = context.editor.scheduler_config
         _validate_scheduler(scheduler_config)
         return scheduler_config
@@ -153,54 +134,11 @@ class DirectInversion(InversionMethod):
             timesteps=context.editor.expected_timesteps,
             scheduler_config=context.editor.scheduler_config,
         )
-        if not math.isclose(
-            guidance_scale, context.config.sampling.guidance_scale,
-            rel_tol=0, abs_tol=1e-9,
-        ):
-            raise ArtifactCompatibilityError(
-                "Direct inversion artifact guidance scale does not match this run"
-            )
+        validate_guidance_compatibility(guidance_scale, context, "Direct inversion")
         self._validate_context(context)
 
     def create_denoising_hook(self, artifact: InversionArtifact) -> DenoisingHook:
         return _DirectInversionHook(artifact)
-
-    @staticmethod
-    def _encode_source(image: Image.Image, context: InversionContext) -> torch.Tensor:
-        editor = context.editor
-        model = context.config.model
-        pixels = editor.pipeline.image_processor.preprocess(
-            image.convert("RGB"), height=model.height, width=model.width
-        ).to(device=editor.device, dtype=editor.dtype)
-        latent = editor.pipeline.vae.encode(pixels).latent_dist.mode()
-        latent = latent * editor.pipeline.vae.config.scaling_factor
-        expected_shape = (1, 4, model.height // 8, model.width // 8)
-        if tuple(latent.shape) != expected_shape:
-            raise ValueError(
-                f"Direct inversion expected latent shape {expected_shape}, "
-                f"got {tuple(latent.shape)}"
-            )
-        _require_finite(latent, "encoded latent")
-        return latent.detach()
-
-    @staticmethod
-    def _pivot_trajectory(
-        latent: torch.Tensor,
-        conditional: torch.Tensor,
-        scheduler: DDIMInverseScheduler,
-        context: InversionContext,
-    ) -> list[torch.Tensor]:
-        # Keep the pivot history on CPU rather than occupying accelerator memory.
-        pivots = [latent.detach().to(device="cpu").contiguous()]
-        for timestep in scheduler.timesteps:
-            model_input = scheduler.scale_model_input(latent, timestep)
-            prediction = context.editor.pipeline.unet(
-                model_input, timestep, encoder_hidden_states=conditional
-            ).sample
-            latent = scheduler.step(prediction, timestep, latent).prev_sample
-            _require_finite(latent, "pivot latent")
-            pivots.append(latent.detach().to(device="cpu").contiguous())
-        return pivots
 
     @staticmethod
     def _calculate_offsets(
@@ -210,11 +148,11 @@ class DirectInversion(InversionMethod):
     ) -> torch.Tensor:
         editor = context.editor
         scale = context.config.sampling.guidance_scale
-        latent = pivots[-1].to(device=editor.device, dtype=editor.dtype)
+        latent = editor.to_device(pivots[-1], dtype=editor.dtype)
         offsets: list[torch.Tensor] = []
         for step_index, timestep in enumerate(editor.scheduler.timesteps):
-            previous_pivot = pivots[-step_index - 2].to(
-                device=editor.device, dtype=editor.dtype
+            previous_pivot = editor.to_device(
+                pivots[-step_index - 2], dtype=editor.dtype
             )
             model_input = torch.cat((latent, latent), dim=0)
             model_input = editor.scheduler.scale_model_input(model_input, timestep)
@@ -234,77 +172,36 @@ class DirectInversion(InversionMethod):
             _require_finite(latent, "corrected trajectory latent")
         return torch.stack(offsets).contiguous()
 
-    @torch.inference_mode()
     def invert(
         self, sample: Mapping[str, Any], context: InversionContext
     ) -> InversionArtifact:
+        return self.invert_batch([sample], context)[0]
+
+    @torch.inference_mode()
+    def invert_batch(
+        self, samples: Sequence[Mapping[str, Any]], context: InversionContext
+    ) -> list[InversionArtifact]:
         """Build conditional pivots and record residuals at the run's guidance."""
-        if not isinstance(sample, Mapping):
-            raise TypeError("Direct inversion sample must be a mapping")
-        uid = sample.get("uid")
-        if not isinstance(uid, str) or not uid.strip():
-            raise ValueError("Dataset uid must be a nonempty string")
-        prompt = sample.get("source_prompt")
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise ValueError("Dataset source_prompt must be a nonempty string")
-        image = sample.get("source_img")
-        if not isinstance(image, Image.Image):
-            raise TypeError("Dataset source_img must be a Pillow image")
-        scheduler_config = self._validate_context(context)
-
-        # Import only during inversion so entry-point discovery stays lightweight.
-        from diffusers import DDIMInverseScheduler
-
+        uids, prompts, images = self._validate_batch(samples, context)
+        self.validate_inversion_config(context.config)
+        inverse_scheduler = self._prepare_inverse_scheduler(context)
         editor = context.editor
-        config = context.config
-        try:
-            inverse_scheduler = DDIMInverseScheduler.from_config(scheduler_config)
-            inverse_scheduler.set_timesteps(
-                config.sampling.num_inference_steps, device=editor.device
-            )
-        except (ValueError, NotImplementedError) as exc:
-            raise ValueError(
-                f"Direct inversion cannot use the editor's scheduler settings: {exc}"
-            ) from exc
-        timesteps = editor.expected_timesteps
-        if tuple(int(step) for step in inverse_scheduler.timesteps.tolist()) != tuple(
-            reversed(timesteps)
-        ):
-            raise ValueError("Direct inverse timesteps must reverse the editor's schedule")
 
         pipeline = editor.pipeline
         try:
             pipeline.maybe_free_model_hooks()
-            latent = self._encode_source(image, context)
-            pipeline.maybe_free_model_hooks()
-            embeddings = editor.encode_prompts(["", prompt]).detach()
-            _require_finite(embeddings, "caption embeddings")
-            pipeline.maybe_free_model_hooks()
-            pivots = self._pivot_trajectory(
-                latent, embeddings[1:], inverse_scheduler, context
-            )
+            sources = prepare_sources(uids, prompts, images, context, "Direct")
+            embeddings = sources.embeddings
+            pivots = conditional_pivots(sources, uids, inverse_scheduler, context, "Direct")
             offsets = self._calculate_offsets(pivots, embeddings, context)
-            artifact = InversionArtifact(
-                method_id=self.method_id,
-                model_id=config.model.model_id,
-                model_revision=config.model.revision,
-                dataset_ref=context.dataset_ref,
-                dataset_fingerprint=context.dataset_fingerprint,
-                sample_uid=uid,
-                scheduler_id="ddim",
-                scheduler_config=scheduler_config,
-                eta=config.sampling.eta,
-                timesteps=timesteps,
-                terminal_latent=pivots[-1],
-                per_step_state={
-                    _OFFSETS_KEY: offsets,
-                    _GUIDANCE_KEY: torch.full(
-                        (len(timesteps),), config.sampling.guidance_scale,
-                        dtype=torch.float64, device="cpu",
-                    ),
-                },
-            )
-            self.validate_replay(artifact, context)
-            return artifact
+            artifacts: list[InversionArtifact] = []
+            for index, uid in enumerate(uids):
+                artifact = build_artifact(self.method_id, context, uid, pivots[-1][index:index + 1], {
+                    _OFFSETS_KEY: offsets[:, index:index + 1],
+                    _GUIDANCE_KEY: guidance_state(context),
+                })
+                self.validate_replay(artifact, context)
+                artifacts.append(artifact)
+            return artifacts
         finally:
             pipeline.maybe_free_model_hooks()

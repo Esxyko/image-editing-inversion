@@ -49,6 +49,7 @@ class RuntimeConfig:
     vae_tiling: bool
     num_workers: int
     pin_memory: bool
+    inversion_batch_size: int = 1
 
     def validate_hardware(self) -> None:
         """Check that the selected accelerator exists before loading model weights."""
@@ -60,7 +61,8 @@ class RuntimeConfig:
         if self.device.startswith("cuda"):
             if not torch.cuda.is_available():
                 raise ConfigError(f"runtime.device={self.device!r} requires available CUDA")
-            index = int(self.device.partition(":")[2] or "0")
+            configured_index = self.device.partition(":")[2]
+            index = int(configured_index) if configured_index else torch.cuda.current_device()
             if index >= torch.cuda.device_count():
                 raise ConfigError(
                     f"runtime.device={self.device!r} is unavailable; "

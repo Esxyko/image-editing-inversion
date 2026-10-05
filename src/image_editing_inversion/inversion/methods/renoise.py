@@ -6,30 +6,32 @@ and stochastic noise correction are outside this adapter's scope.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
-import math
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
-from PIL import Image
 import torch
 import yaml
 
-from ...artifacts import ArtifactCompatibilityError, InversionArtifact
-from ...config import ConfigError
+from ...artifacts import InversionArtifact
+from ...config import ConfigError, ExperimentConfig
 from ..base import InversionMethod
 from ..context import InversionContext
+from ..validation import validate_sampling
 from ..hooks import DenoisingHook, DenoisingStepState
+from .common import (
+    GUIDANCE_KEY as _GUIDANCE_KEY, build_artifact, guidance_state, prepare_sources,
+    require_finite, validate_ddim_scheduler,
+    validate_guidance_compatibility, validate_guidance_state,
+)
 
 
 _SETTINGS_PATH = Path("method_h_params/ReNoise.yaml")
-_GUIDANCE_KEY = "guidance_scale"
 _LOW_TIMESTEP_BOUNDARY = 250
 
 
-def _require_finite(tensor: torch.Tensor, name: str) -> None:
-    if not torch.isfinite(tensor).all().item():
-        raise ValueError(f"ReNoise inversion produced non-finite {name}")
+_require_finite = partial(require_finite, label="ReNoise")
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,15 +103,7 @@ class _ReNoiseSettings:
         return self.num_renoise_steps, self.average_step_range
 
 
-def _validate_scheduler(scheduler_config: Mapping[str, Any]) -> None:
-    for name, required in (
-        ("prediction_type", "epsilon"),
-        ("timestep_spacing", "leading"),
-        ("clip_sample", False),
-        ("thresholding", False),
-    ):
-        if scheduler_config.get(name) != required:
-            raise ValueError(f"ReNoise inversion requires DDIM {name} == {required!r}")
+_validate_scheduler = partial(validate_ddim_scheduler, label="ReNoise")
 
 
 def _artifact_state(artifact: InversionArtifact) -> float:
@@ -121,20 +115,8 @@ def _artifact_state(artifact: InversionArtifact) -> float:
     _validate_scheduler(artifact.scheduler_config)
     if set(artifact.per_step_state) != {_GUIDANCE_KEY}:
         raise ValueError("ReNoise artifacts require guidance_scale state only")
-    guidance = artifact.per_step_state[_GUIDANCE_KEY]
-    if (
-        not isinstance(guidance, torch.Tensor)
-        or not guidance.is_floating_point()
-        or tuple(guidance.shape) != (len(artifact.timesteps),)
-        or not artifact.timesteps
-    ):
-        raise ValueError("ReNoise guidance_scale must be a floating [timesteps] tensor")
     _require_finite(artifact.terminal_latent, "terminal latent")
-    _require_finite(guidance, "saved guidance scale")
-    scale = float(guidance[0].item())
-    if scale < 0 or not torch.all(guidance == guidance[0]).item():
-        raise ValueError("ReNoise guidance_scale must be constant and nonnegative")
-    return scale
+    return validate_guidance_state(artifact, "ReNoise")
 
 
 class _ReNoiseHook(DenoisingHook):
@@ -161,7 +143,7 @@ class _ReNoiseHook(DenoisingHook):
 
 
 class ReNoiseInversion(InversionMethod):
-    """Invert one image by refining and averaging DDIM noise predictions."""
+    """Invert source batches by refining and averaging DDIM noise predictions."""
 
     def __init__(self) -> None:
         self._settings: _ReNoiseSettings | None = None
@@ -176,18 +158,39 @@ class ReNoiseInversion(InversionMethod):
         return self._settings
 
     def inversion_cache_parameters(self, context: InversionContext) -> Mapping[str, Any]:
-        return asdict(self._inversion_settings())
+        settings = self._inversion_settings()
+        # Cache effective predictions, not unused windows or caps. Predictions
+        # after the averaging window cannot change the selected final average.
+        schedule = []
+        for timestep in context.editor.expected_timesteps:
+            refinements, (start, end) = settings.for_timestep(timestep)
+            selected = [start, end] if settings.average_latent_estimations else [refinements, refinements + 1]
+            schedule.append({"prediction_range": selected})
+        return {"prediction_schedule": schedule}
+
+    def validate_inversion_config(self, config: ExperimentConfig) -> None:
+        validate_sampling(config, "ReNoise")
+        self._inversion_settings()
+
+    def validate_inversion_context(self, context: InversionContext) -> None:
+        self._prepare_coefficients(context)
+
+    def _prepare_coefficients(
+        self, context: InversionContext,
+    ) -> list[tuple[int, torch.Tensor, torch.Tensor]]:
+        self._validate_context(context)
+        from diffusers import DDIMScheduler
+
+        if not isinstance(context.editor.scheduler, DDIMScheduler):
+            raise ValueError("ReNoise inversion requires the editor's DDIM scheduler")
+        return self._coefficients(context)
 
     @staticmethod
     def _validate_context(context: InversionContext) -> dict[str, Any]:
         config = context.config
         if config != context.editor.config:
             raise ValueError("ReNoise context must use the editor's configuration")
-        if config.sampling.eta != 0:
-            raise ValueError("ReNoise inversion requires sampling.eta == 0")
-        scale = config.sampling.guidance_scale
-        if not math.isfinite(scale) or scale < 0:
-            raise ValueError("ReNoise requires finite, nonnegative sampling.guidance_scale")
+        validate_sampling(config, "ReNoise")
         scheduler_config = context.editor.scheduler_config
         _validate_scheduler(scheduler_config)
         return scheduler_config
@@ -203,35 +206,11 @@ class ReNoiseInversion(InversionMethod):
             timesteps=context.editor.expected_timesteps,
             scheduler_config=context.editor.scheduler_config,
         )
-        if not math.isclose(
-            guidance_scale, context.config.sampling.guidance_scale,
-            rel_tol=0, abs_tol=1e-9,
-        ):
-            raise ArtifactCompatibilityError(
-                "ReNoise artifact guidance scale does not match this run"
-            )
+        validate_guidance_compatibility(guidance_scale, context, "ReNoise")
         self._validate_context(context)
 
     def create_denoising_hook(self, artifact: InversionArtifact) -> DenoisingHook:
         return _ReNoiseHook(artifact)
-
-    @staticmethod
-    def _encode_source(image: Image.Image, context: InversionContext) -> torch.Tensor:
-        editor = context.editor
-        model = context.config.model
-        pixels = editor.pipeline.image_processor.preprocess(
-            image.convert("RGB"), height=model.height, width=model.width
-        ).to(device=editor.device, dtype=editor.dtype)
-        latent = editor.pipeline.vae.encode(pixels).latent_dist.mode()
-        latent = latent * editor.pipeline.vae.config.scaling_factor
-        expected_shape = (1, 4, model.height // 8, model.width // 8)
-        if tuple(latent.shape) != expected_shape:
-            raise ValueError(
-                f"ReNoise inversion expected latent shape {expected_shape}, "
-                f"got {tuple(latent.shape)}"
-            )
-        _require_finite(latent, "encoded latent")
-        return latent.detach()
 
     @staticmethod
     def _coefficients(
@@ -263,9 +242,9 @@ class ReNoiseInversion(InversionMethod):
                 scheduler.alphas_cumprod[previous_timestep]
                 if previous_timestep >= 0 else scheduler.final_alpha_cumprod
             )
-            alpha_t = alpha_t.to(device=context.editor.device, dtype=torch.float32)
-            alpha_previous = alpha_previous.to(
-                device=context.editor.device, dtype=torch.float32
+            alpha_t = context.editor.to_device(alpha_t, dtype=torch.float32)
+            alpha_previous = context.editor.to_device(
+                alpha_previous, dtype=torch.float32
             )
             for alpha in (alpha_t, alpha_previous):
                 if not torch.isfinite(alpha).item() or not 0 < alpha.item() <= 1:
@@ -325,63 +304,38 @@ class ReNoiseInversion(InversionMethod):
         _require_finite(estimate, "runtime-precision latent")
         return estimate
 
-    @torch.inference_mode()
     def invert(
         self, sample: Mapping[str, Any], context: InversionContext
     ) -> InversionArtifact:
-        if not isinstance(sample, Mapping):
-            raise TypeError("ReNoise inversion sample must be a mapping")
-        uid = sample.get("uid")
-        if not isinstance(uid, str) or not uid.strip():
-            raise ValueError("Dataset uid must be a nonempty string")
-        prompt = sample.get("source_prompt")
-        if not isinstance(prompt, str) or not prompt.strip():
-            raise ValueError("Dataset source_prompt must be a nonempty string")
-        image = sample.get("source_img")
-        if not isinstance(image, Image.Image):
-            raise TypeError("Dataset source_img must be a Pillow image")
-        scheduler_config = self._validate_context(context)
-        settings = self._inversion_settings()
-        # Discovery and artifact replay never import Diffusers or read settings.
-        from diffusers import DDIMScheduler
+        return self.invert_batch([sample], context)[0]
 
+    @torch.inference_mode()
+    def invert_batch(
+        self, samples: Sequence[Mapping[str, Any]], context: InversionContext
+    ) -> list[InversionArtifact]:
+        """Refine a batch of sources with independent DDIM noise estimates."""
+        uids, prompts, images = self._validate_batch(samples, context)
+        self.validate_inversion_config(context.config)
+        coefficients = self._prepare_coefficients(context)
+        settings = self._inversion_settings()
         editor = context.editor
-        config = context.config
-        if not isinstance(editor.scheduler, DDIMScheduler):
-            raise ValueError("ReNoise inversion requires the editor's DDIM scheduler")
-        coefficients = self._coefficients(context)
         pipeline = editor.pipeline
         try:
             pipeline.maybe_free_model_hooks()
-            latent = self._encode_source(image, context)
-            pipeline.maybe_free_model_hooks()
-            embeddings = editor.encode_prompts(["", prompt]).detach()
-            _require_finite(embeddings, "caption embeddings")
-            pipeline.maybe_free_model_hooks()
+            sources = prepare_sources(uids, prompts, images, context, "ReNoise")
+            latent, embeddings = sources.latent, sources.embeddings
             for timestep, a, b in coefficients:
                 latent = self._renoise_step(
                     latent, timestep, a, b, embeddings, settings, context
                 )
-            artifact = InversionArtifact(
-                method_id=self.method_id,
-                model_id=config.model.model_id,
-                model_revision=config.model.revision,
-                dataset_ref=context.dataset_ref,
-                dataset_fingerprint=context.dataset_fingerprint,
-                sample_uid=uid,
-                scheduler_id="ddim",
-                scheduler_config=scheduler_config,
-                eta=config.sampling.eta,
-                timesteps=editor.expected_timesteps,
-                terminal_latent=latent.detach().to(device="cpu").contiguous(),
-                per_step_state={
-                    _GUIDANCE_KEY: torch.full(
-                        (len(editor.expected_timesteps),), config.sampling.guidance_scale,
-                        dtype=torch.float64, device="cpu",
-                    ),
-                },
-            )
-            self.validate_replay(artifact, context)
-            return artifact
+            terminal = latent.detach().to(device="cpu")
+            artifacts: list[InversionArtifact] = []
+            for index, uid in enumerate(uids):
+                artifact = build_artifact(self.method_id, context, uid, terminal[index:index + 1], {
+                    _GUIDANCE_KEY: guidance_state(context),
+                })
+                self.validate_replay(artifact, context)
+                artifacts.append(artifact)
+            return artifacts
         finally:
             pipeline.maybe_free_model_hooks()

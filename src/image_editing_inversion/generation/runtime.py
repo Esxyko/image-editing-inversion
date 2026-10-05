@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-import hashlib
-import platform
+import json
+from pathlib import Path
 from typing import Any
 
 from diffusers import DDIMScheduler, StableDiffusionPipeline
 import torch
 
 from ..config import ExperimentConfig
+from .identity import ModelContentIdentity
 
 
 class ModelRuntime:
@@ -26,9 +27,17 @@ class ModelRuntime:
             "float32": torch.float32,
             "bfloat16": torch.bfloat16,
         }[config.runtime.dtype]
+        model_path = Path(config.model.model_id).expanduser()
+        commit = None
+        if not model_path.is_dir():
+            model_path = Path(StableDiffusionPipeline.download(
+                config.model.model_id, revision=config.model.revision,
+                safety_checker=None,
+            ))
+            commit = model_path.name
+        model_path = model_path.resolve()
         pipeline = StableDiffusionPipeline.from_pretrained(
-            config.model.model_id,
-            revision=config.model.revision,
+            str(model_path),
             torch_dtype=self.dtype,
             safety_checker=None,
             requires_safety_checker=False,
@@ -53,6 +62,11 @@ class ModelRuntime:
         pipeline.text_encoder.eval()
         pipeline.vae.eval()
         self.pipeline = pipeline
+        self.model_commit = commit
+        self.model_content_identity = ModelContentIdentity(model_path).describe(pipeline)
+
+    def component_content_identity(self, components: tuple[str, ...]) -> dict[str, Any]:
+        return ModelContentIdentity.for_components(self.model_content_identity, components)
 
     def reconfigure(self, config: ExperimentConfig) -> None:
         """Change sampling/edit settings while retaining the loaded model."""
@@ -65,34 +79,15 @@ class ModelRuntime:
         self.config = config
 
     def inversion_cache_settings(self) -> dict[str, Any]:
-        """Describe execution settings that can change inversion numerics."""
+        """Keep precision and VAE tiling; tolerate minor execution differences."""
         settings: dict[str, Any] = {
-            "device": str(self.device),
             "dtype": str(self.dtype),
-            "vae_slicing": self.config.runtime.vae_slicing,
             "vae_tiling": self.config.runtime.vae_tiling,
-            "machine": platform.machine(),
-            "processor": platform.processor(),
-            "torch_build_sha256": hashlib.sha256(
-                torch.__config__.show().encode("utf-8")
-            ).hexdigest(),
-            "matmul_precision": torch.get_float32_matmul_precision(),
-            "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
         }
-        if self.device.type == "cuda":
-            settings["cuda"] = {
-                "device_name": torch.cuda.get_device_name(self.device),
-                "capability": list(torch.cuda.get_device_capability(self.device)),
-                "version": torch.version.cuda,
-                "cudnn_version": torch.backends.cudnn.version(),
-                "matmul_tf32": torch.backends.cuda.matmul.allow_tf32,
-                "cudnn_tf32": torch.backends.cudnn.allow_tf32,
-                "cudnn_benchmark": torch.backends.cudnn.benchmark,
-                "cudnn_deterministic": torch.backends.cudnn.deterministic,
-                "flash_sdp": torch.backends.cuda.flash_sdp_enabled(),
-                "memory_efficient_sdp": torch.backends.cuda.mem_efficient_sdp_enabled(),
-                "math_sdp": torch.backends.cuda.math_sdp_enabled(),
+        if self.config.runtime.vae_tiling:
+            settings["tiling"] = {
+                name: getattr(self.pipeline.vae, name) for name in (
+                    "tile_sample_min_size", "tile_latent_min_size", "tile_overlap_factor",
+                )
             }
-        elif self.device.type == "cpu":
-            settings["num_threads"] = torch.get_num_threads()
-        return settings
+        return json.loads(json.dumps(settings, allow_nan=False))

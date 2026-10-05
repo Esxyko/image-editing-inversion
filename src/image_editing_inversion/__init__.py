@@ -1,5 +1,5 @@
 """Compare inversion artifacts with a shared Prompt-to-Prompt editor."""
 
-from .cli import main
+from .cli import diffuse
 
-__all__ = ["main"]
+__all__ = ["diffuse"]

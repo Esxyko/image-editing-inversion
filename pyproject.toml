@@ -31,7 +31,7 @@ url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [project.scripts]
-image-editing-inversion = "image_editing_inversion:main"
+diffuse = "image_editing_inversion:diffuse"
 
 [project.entry-points."image_editing_inversion.methods"]
 ddim = "image_editing_inversion.inversion.methods.ddim:DDIMInversion"

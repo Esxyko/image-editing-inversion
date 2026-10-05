@@ -18,12 +18,14 @@ prompt_to_prompt:
 methods: {}
 
 runtime:
+  # Starting point for a 32 GB VRAM GPU at the configured 512x512 resolution.
   device: cuda
   dtype: float16
-  batch_size: 1
-  attention_query_chunk_size: 256
+  batch_size: 4
+  inversion_batch_size: 2 # Source images per inversion batch; allows room for Null-text gradients.
+  attention_query_chunk_size: 1024
   cpu_offload: none # "none", "model", or "sequential"
-  vae_slicing: false
+  vae_slicing: true
   vae_tiling: false
   num_workers: 0
   pin_memory: true

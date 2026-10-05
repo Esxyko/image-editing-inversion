@@ -7,7 +7,8 @@ from typing import Any, Mapping
 
 from datasets import Dataset, load_from_disk
 
-from .loader import load_project_dataset
+from .identity import DatasetContentIdentity
+from .loader import PROJECT_DATA_DIR, load_project_dataset
 from .schema import HUB_DATASET_REF, LOCAL_DATASET_REF, REQUIRED_COLUMNS
 
 
@@ -17,6 +18,7 @@ class DatasetRepository:
     def __init__(self, dataset_path: Path | None) -> None:
         if dataset_path is None:
             self.dataset = load_project_dataset()
+            resolved_path = PROJECT_DATA_DIR
             self.dataset_ref = HUB_DATASET_REF
             self.dataset_location = HUB_DATASET_REF
         else:
@@ -35,6 +37,20 @@ class DatasetRepository:
         self._uid_to_index = {uid: index for index, uid in enumerate(uids)}
         if len(self._uid_to_index) != len(uids):
             raise ValueError("The dataset contains duplicate UIDs.")
+        self._content_identity = DatasetContentIdentity(self.dataset, resolved_path)
+        self._content_digest: str | None = None
+
+    @property
+    def content_digest(self) -> str:
+        """Read actual dependency bytes once, sharing the digest across a sweep."""
+        if self._content_digest is None:
+            self._content_digest = self._content_identity.digest()
+        return self._content_digest
+
+    @property
+    def uids(self) -> tuple[str, ...]:
+        """Return every UID in dataset order without materializing images."""
+        return tuple(self._uid_to_index)
 
     def sample(self, uid: str) -> Mapping[str, Any]:
         """Return a sample for a UID, rejecting identifiers outside the dataset."""

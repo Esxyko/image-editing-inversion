@@ -1,33 +1,29 @@
-"""Coordinate dataset samples, inversion artifacts, and shared editing runs."""
+"""Schedule parameter sweeps, inversion batches, and prepared editing batches."""
 
 from __future__ import annotations
 
-import json
-import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
-import hashlib
-from importlib.metadata import version
-import inspect
+from contextlib import ExitStack
+from itertools import groupby
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
-from ..artifacts import ArtifactCatalog, ArtifactCompatibilityError, InversionArtifact
-from ..config import ExperimentConfig, discover_pipeline_h_params, load_config
+from ..artifacts import (
+    ArtifactCatalog, ArtifactCompatibilityError, ArtifactReference,
+    ArtifactRepository, ArtifactSettings, IntermediateCache,
+)
+from ..artifacts.layout import method_directory_name
+from ..config import ConfigError, ExperimentConfig, discover_pipeline_h_params, load_config
 from ..data import DatasetRepository
-from ..generation import Editor, PromptToPrompt
+from ..generation import Editor
 from ..inversion import InversionContext, InversionMethod, discover_methods, get_method
+from ..inversion.methods.common import SharedInversionComponents
+from .inversion import InversionCoordinator
+from .models import InversionRecord, WorkItem
 from .output import RunOutput, SweepOutput
-
-
-@dataclass(slots=True)
-class _WorkItem:
-    artifact: InversionArtifact
-    artifact_path: Path
-    sample: Mapping[str, Any]
-    ordinal: int
-    inversion_seconds: float | None = None
-    artifact_reused: bool = True
+from .replay import ReplayPreparer
+from .timing import BatchTiming
 
 
 def _chunks(items: Iterable[Any], size: int) -> Iterable[list[Any]]:
@@ -41,13 +37,28 @@ def _chunks(items: Iterable[Any], size: int) -> Iterable[list[Any]]:
         yield chunk
 
 
+def _resolve_method_ids(method_ids: Sequence[str]) -> tuple[str, ...]:
+    """Expand ALL and validate each unique method before workflow setup."""
+    if not method_ids:
+        raise ValueError("At least one inversion method is required.")
+    discovered = discover_methods()
+    resolved: dict[str, None] = {}
+    for selector in method_ids:
+        selected = discovered if selector == "ALL" else (selector,)
+        for method_id in selected:
+            method_directory_name(method_id)
+            get_method(method_id)
+            resolved[method_id] = None
+    if not resolved:
+        raise ValueError("No inversion methods are registered.")
+    return tuple(resolved)
+
+
 class WorkflowRunner:
     """Run parameter files sequentially with one dataset and model runtime."""
 
     def __init__(
         self,
-        dataset_path: Path | None,
-        output_root: Path,
         *,
         pipeline_h_params_file: str | Path | None = None,
     ) -> None:
@@ -58,54 +69,97 @@ class WorkflowRunner:
         self.config: ExperimentConfig = self._parameter_configs[0][1]
         for _, config in self._parameter_configs:
             config.validate_hardware()
-        self._repository = DatasetRepository(dataset_path)
+        self._repository = DatasetRepository(None)
         self.dataset = self._repository.dataset
         self.dataset_ref = self._repository.dataset_ref
         self.dataset_location = self._repository.dataset_location
         self.dataset_fingerprint = self._repository.dataset_fingerprint
         self._sweep_output = SweepOutput(
-            output_root, [path for path, _ in self._parameter_configs]
+            Path("data/output"), [path for path, _ in self._parameter_configs]
         )
         self.output_dir = self._sweep_output.output_dir
-        self.results_path = self.output_dir / self._parameter_configs[0][0].name / "results.jsonl"
-        self._output: RunOutput | None = None
+        self.results_path: Path | None = None
+        self._outputs: dict[str, RunOutput] = {}
+        self._finished_methods: set[str] = set()
+        self._active_method_id: str | None = None
+        self._parameter_path: Path | None = None
         self._editor: Editor | None = None
-        self._catalog: ArtifactCatalog | None = None
-        self._fingerprints: dict[str, dict[str, Any]] = {}
-        self._next_ordinal = 0
-
-    @property
-    def _run_output(self) -> RunOutput:
-        if self._output is None:
-            raise RuntimeError("No parameter-file run is active")
-        return self._output
+        self._coordinator: InversionCoordinator | None = None
+        self._components: SharedInversionComponents | None = None
+        self._replay = ReplayPreparer(self._repository)
 
     def _activate_configuration(self, path: Path, config: ExperimentConfig) -> None:
-        self._output = RunOutput(
-            self.output_dir / path.name, config, self.dataset_ref,
-            self.dataset_fingerprint, self.dataset_location, path,
-        )
-        self.results_path = self._output.results_path
-        self._next_ordinal = 0
+        self._outputs = {}
+        self._finished_methods = set()
+        self._active_method_id = None
+        self._parameter_path = path
+        self.results_path = None
         if self._editor is not None:
             self._editor.reconfigure(config)
         self.config = config
 
-    def _sweep(self, action: Callable[[], None]) -> Path:
+    def _output_for(self, method_id: str) -> RunOutput:
+        method_id = method_directory_name(method_id)
+        if self._parameter_path is None:
+            raise RuntimeError("No parameter-file run is active")
+        self._active_method_id = method_id
+        if method_id not in self._outputs:
+            self._sweep_output.update_method(
+                self._parameter_path.name, method_id, "running",
+                {"ok": 0, "skipped": 0, "error": 0},
+            )
+            self._outputs[method_id] = RunOutput(
+                self.output_dir / self._parameter_path.name / method_id,
+                self.config, self.dataset_ref, self.dataset_fingerprint,
+                self.dataset_location, self._parameter_path, method_id,
+            )
+        output = self._outputs[method_id]
+        self.results_path = output.results_path
+        return output
+
+    def _finish_method(self, method_id: str) -> None:
+        self._active_method_id = method_id
+        output = self._outputs[method_id]
+        self._sweep_output.update_method(
+            output.pipeline_h_params_file, method_id,
+            "ok" if output.counts["ok"] else "skipped", output.counts,
+        )
+        self._finished_methods.add(method_id)
+
+    def _counts(self) -> dict[str, int]:
+        return {key: sum(output.counts[key] for output in self._outputs.values())
+                for key in ("ok", "skipped", "error")}
+
+    def _sweep(self, action: Callable[[], None], method_ids: Sequence[str]) -> Path:
+        self._sweep_output.set_methods(method_ids)
         completed = 0
         for path, config in self._parameter_configs:
             try:
                 self._activate_configuration(path, config)
-                self._sweep_output.update(path.name, "running", self._run_output.counts)
+                self._sweep_output.update(path.name, "running", self._counts())
                 action()
-            except Exception as exc:
-                counts = (self._output.counts if self._output is not None
-                          and self._output.pipeline_h_params_file == path.name
-                          else {"ok": 0, "skipped": 0, "error": 0})
-                self._sweep_output.update(path.name, "error", counts, str(exc))
+                for method_id in self._outputs:
+                    if method_id not in self._finished_methods:
+                        self._finish_method(method_id)
+            except BaseException as exc:
+                for method_id, output in self._outputs.items():
+                    if output.counts["error"] or method_id == self._active_method_id:
+                        self._sweep_output.update_method(
+                            path.name, method_id, "error", output.counts, str(exc)
+                        )
+                    elif method_id not in self._finished_methods:
+                        self._sweep_output.update_method(
+                            path.name, method_id, "running", output.counts
+                        )
+                if self._active_method_id is not None and self._active_method_id not in self._outputs:
+                    self._sweep_output.update_method(
+                        path.name, self._active_method_id, "error",
+                        {"ok": 0, "skipped": 0, "error": 0}, str(exc),
+                    )
+                self._sweep_output.update(path.name, "error", self._counts(), str(exc))
                 self._sweep_output.finish("error", str(exc))
                 raise
-            counts = self._run_output.counts
+            counts = self._counts()
             completed += counts["ok"]
             self._sweep_output.update(
                 path.name, "ok" if counts["ok"] else "skipped", counts
@@ -130,12 +184,9 @@ class WorkflowRunner:
             config=self.config,
             dataset_ref=self.dataset_ref,
             dataset_fingerprint=self.dataset_fingerprint,
+            components=self._components,
+            dataset_content=self._repository.content_digest,
         )
-
-    def _allocate_ordinal(self) -> int:
-        ordinal = self._next_ordinal
-        self._next_ordinal += 1
-        return ordinal
 
     def _sample(self, uid: str) -> Mapping[str, Any]:
         return self._repository.sample(uid)
@@ -147,385 +198,299 @@ class WorkflowRunner:
         with ThreadPoolExecutor(max_workers=self.config.runtime.num_workers) as pool:
             return list(pool.map(function, values))
 
-    def _load_artifact(self, path: Path) -> tuple[InversionArtifact, Path, Mapping[str, Any]]:
-        resolved = path.expanduser().resolve()
-        artifact = InversionArtifact.load(resolved)
-        self._check_artifact_identity(artifact)
-        return artifact, resolved, self._sample(artifact.sample_uid)
+    def _record(self, values: Mapping[str, Any]) -> None:
+        self._output_for(values["method_id"]).record(values)
 
-    def _load_artifact_result(
-        self, path: Path
-    ) -> tuple[InversionArtifact, Path, Mapping[str, Any]] | Exception:
-        try:
-            return self._load_artifact(path)
-        except Exception as exc:
-            return exc
-
-    def _check_artifact_identity(self, artifact: InversionArtifact) -> None:
-        self._repository.validate_identity(
-            artifact.dataset_ref, artifact.dataset_fingerprint, artifact.sample_uid
+    @property
+    def artifact_settings(self) -> ArtifactSettings:
+        """Supply independent expectations for persisted production identity."""
+        return ArtifactSettings(
+            model_id=self.config.model.model_id,
+            model_revision=self.config.model.revision,
+            dataset_ref=self.dataset_ref,
+            dataset_fingerprint=self.dataset_fingerprint,
+            scheduler_config=self.editor.scheduler_config,
+            eta=self.config.sampling.eta,
+            timesteps_for_steps=self.editor.timesteps_for_steps,
+            model_content=self.editor.model_content_identity,
+            dataset_content=self._repository.content_digest,
+            numerics=self.editor.inversion_cache_settings(),
         )
 
-    def _record(self, values: Mapping[str, Any]) -> None:
-        self._run_output.record(values)
+    def _preflight(self, methods: Sequence[InversionMethod]) -> None:
+        """Validate every inversion combination before any sample is processed."""
+        self._sweep_output.set_methods([method.method_id for method in methods])
+        errors: list[tuple[Path, str, str]] = []
+        for path, config in self._parameter_configs:
+            for method in methods:
+                for check in (
+                    lambda: method.validate_inversion_config(config),
+                    lambda: self._replay.check_batch_size(method, config),
+                    lambda: self._replay.policy_for(method, config),
+                ):
+                    try:
+                        check()
+                    except Exception as exc:
+                        errors.append((path, method.method_id, str(exc)))
+        if errors:
+            self._fail_preflight(errors)
 
-    def _cache_inputs(self, method: InversionMethod, uid: str) -> dict[str, Any] | None:
-        parameters = method.inversion_cache_parameters(self.inversion_context)
-        if parameters is None:
-            return None
-        if not isinstance(parameters, Mapping):
-            raise TypeError("inversion_cache_parameters must return a mapping or None")
-        if method.method_id not in self._fingerprints:
-            generation_dir = Path(inspect.getfile(Editor)).parent
-            sources = {
-                "method": Path(inspect.getfile(type(method))),
-                "base": Path(inspect.getfile(InversionMethod)),
-                "context": Path(inspect.getfile(InversionContext)),
-                "hooks": Path(inspect.getfile(InversionMethod)).with_name("hooks.py"),
-                "editor": generation_dir / "editor.py",
-                "runtime": generation_dir / "runtime.py",
-                "artifact": Path(inspect.getfile(InversionArtifact)),
-            }
-            self._fingerprints[method.method_id] = {
-                "method_class": f"{type(method).__module__}.{type(method).__qualname__}",
-                "sources": {
-                    name: hashlib.sha256(path.read_bytes()).hexdigest()
-                    for name, path in sources.items()
-                },
-                "dependencies": {
-                    package: version(package)
-                    for package in ("torch", "diffusers", "transformers", "accelerate",
-                                    "pillow", "safetensors")
-                },
-            }
+        # Only the second phase constructs a model; all contexts share its weights.
+        try:
+            _ = self.editor
+        except Exception as exc:
+            self._fail_preflight([
+                (path, method.method_id, str(exc))
+                for path, _ in self._parameter_configs for method in methods
+            ])
+        for path, config in self._parameter_configs:
+            try:
+                self._activate_configuration(path, config)
+                context = self.inversion_context
+            except Exception as exc:
+                errors.extend((path, method.method_id, str(exc)) for method in methods)
+                continue
+            for method in methods:
+                try:
+                    method.validate_inversion_context(context)
+                except Exception as exc:
+                    errors.append((path, method.method_id, str(exc)))
+        if errors:
+            self._fail_preflight(errors)
+        first_path, first_config = self._parameter_configs[0]
+        try:
+            self._activate_configuration(first_path, first_config)
+        except Exception as exc:
+            self._fail_preflight([(first_path, method.method_id, str(exc)) for method in methods])
+
+    def _fail_preflight(self, errors: Sequence[tuple[Path, str, str]]) -> None:
+        reasons: dict[tuple[str, str], list[str]] = {}
+        for path, method_id, reason in errors:
+            reasons.setdefault((path.name, method_id), []).append(reason)
+        counts = {"ok": 0, "skipped": 0, "error": 0}
+        for (filename, method_id), messages in reasons.items():
+            self._sweep_output.update_method(filename, method_id, "error", counts, "; ".join(messages))
+        message = "Inversion preflight failed:\n" + "\n".join(
+            f"- {filename} / {method_id}: {'; '.join(messages)}"
+            for (filename, method_id), messages in reasons.items()
+        )
+        for filename in dict.fromkeys(filename for filename, _ in reasons):
+            self._sweep_output.update(filename, "error", counts, message)
+        self._sweep_output.finish("error", message)
+        raise ConfigError(message)
+
+    @staticmethod
+    def _reference_values(
+        reference: ArtifactReference, inversion: InversionRecord | None = None,
+    ) -> dict[str, Any]:
         return {
-            "cache_version": 1,
-            "dataset_ref": self.dataset_ref,
-            "dataset_fingerprint": self.dataset_fingerprint,
-            "sample_uid": uid,
-            "method_id": method.method_id,
-            "model": asdict(self.config.model),
-            "scheduler": {
-                "id": "ddim", "config": self.editor.scheduler_config,
-                "timesteps": list(self.editor.expected_timesteps),
-                "eta": self.config.sampling.eta,
-            },
-            "guidance_scale": self.config.sampling.guidance_scale,
-            "method_parameters": dict(parameters),
-            "numerics": self.editor.inversion_cache_settings(),
-            "implementation": self._fingerprints[method.method_id],
+            "uid": reference.sample_uid,
+            "method_id": reference.path.parent.parent.name,
+            "artifact": str(reference.path),
+            "artifact_index": reference.index,
+            "artifact_reused": True if inversion is None else inversion.artifact_reused,
+            "inversion_batch_id": None if inversion is None else inversion.batch_id,
+            "inversion_seconds": None if inversion is None else inversion.inversion_seconds,
+            "inversion_batch_seconds": None if inversion is None else inversion.inversion_batch_seconds,
+            "inversion_batch_size": None if inversion is None else inversion.inversion_batch_size,
         }
 
-    def _validate_inversion(
-        self, artifact: InversionArtifact, method: InversionMethod, uid: str
-    ) -> None:
-        if not isinstance(artifact, InversionArtifact):
-            raise TypeError(f"Method {method.method_id!r} must return InversionArtifact")
-        if artifact.method_id != method.method_id or artifact.sample_uid != uid:
-            raise ValueError(
-                f"Method {method.method_id!r} returned an artifact for a different method or UID"
-            )
-        self._check_artifact_identity(artifact)
-        method.validate_replay(artifact, self.inversion_context)
-        self.editor.validate_artifact(artifact)
-
-    def _invert_or_reuse(
-        self, method: InversionMethod, sample: Mapping[str, Any], uid: str
-    ) -> tuple[InversionArtifact, Path, bool]:
-        if self._catalog is None:
-            raise RuntimeError("The inversion artifact catalog is not initialized")
-        inputs = self._cache_inputs(method, uid)
-        cached = None if inputs is None else self._catalog.lookup(inputs)
-        if cached is not None:
-            artifact, path = cached
-            try:
-                self._validate_inversion(artifact, method, uid)
-            except (ValueError, TypeError, KeyError):
-                pass
-            else:
-                return artifact, path, True
-        artifact = method.invert(sample, self.inversion_context)
-        self._validate_inversion(artifact, method, uid)
-        return artifact, self._catalog.store(artifact, inputs), False
-
-    def _method_for(self, artifact: InversionArtifact) -> InversionMethod:
-        try:
-            return get_method(artifact.method_id)
-        except KeyError as exc:
-            raise ValueError(
-                f"Artifact method {artifact.method_id!r} is not registered; "
-                "install its adapter before replay"
-            ) from exc
-
-    def _prompt_to_prompt_for(
-        self, method: InversionMethod
-    ) -> tuple[type[PromptToPrompt], dict[str, Any]]:
-        selected = method.prompt_to_prompt_class
-        policy_class = PromptToPrompt if selected is None else selected
-        if not isinstance(policy_class, type) or not issubclass(
-            policy_class, PromptToPrompt
-        ):
-            raise TypeError(
-                f"Method {method.method_id!r} prompt_to_prompt_class must subclass PromptToPrompt"
-            )
-        try:
-            settings = policy_class.validate_method_settings(
-                self.config.method_prompt_to_prompt(method.method_id)
-            )
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"Invalid Prompt-to-Prompt settings for method {method.method_id!r}: {exc}"
-            ) from exc
-        if not isinstance(settings, Mapping) or any(
-            not isinstance(key, str) for key in settings
-        ):
-            raise TypeError(
-                f"Method {method.method_id!r} returned invalid Prompt-to-Prompt settings"
-            )
-        try:
-            normalized = json.loads(json.dumps(dict(settings), sort_keys=True, allow_nan=False))
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"Method {method.method_id!r} Prompt-to-Prompt settings must be JSON-compatible"
-            ) from exc
-        return policy_class, normalized
-
-    def _hook_for(self, method: InversionMethod, artifact: InversionArtifact) -> Any:
-        self._check_method_batch_size(method)
-        method.validate_replay(artifact, self.inversion_context)
-        self.editor.validate_artifact(artifact)
-        hook = method.create_denoising_hook(artifact)
-        if artifact.per_step_state and hook is None:
-            raise ValueError(
-                f"Artifact method {artifact.method_id!r} needs a denoising hook."
-            )
-        return hook
-
-    def _check_method_batch_size(self, method: InversionMethod) -> None:
-        limit = method.max_edit_batch_size
-        if limit is None:
-            return
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
-            raise ValueError(
-                f"Method {method.method_id!r} has an invalid max_edit_batch_size"
-            )
-        if self.config.runtime.batch_size > limit:
-            raise ValueError(
-                f"Method {method.method_id!r} supports edit batches of at most "
-                f"{limit}; configured batch_size is {self.config.runtime.batch_size}"
-            )
-
-    def _edit_batch(self, items: list[_WorkItem]) -> None:
+    def _edit_batch(self, items: list[WorkItem], timing: BatchTiming) -> None:
         if not items:
+            timing.status = "skipped"
             return
-        started = time.perf_counter()
+        policy = items[0].prepared
+        output = self._output_for(policy.loaded.artifact.method_id)
+        batch_seconds = timing.durations.get("preparation", 0.0)
         try:
-            discover_methods()
-            methods = [self._method_for(item.artifact) for item in items]
-            selections = [self._prompt_to_prompt_for(method) for method in methods]
-            policy_class, settings = selections[0]
             if any(
-                selected_class is not policy_class or selected_settings != settings
-                for selected_class, selected_settings in selections[1:]
+                item.prepared.policy_class is not policy.policy_class
+                or item.prepared.settings != policy.settings
+                or item.prepared.method.method_id != policy.method.method_id
+                for item in items[1:]
             ):
-                raise ValueError(
-                    "A GPU edit batch cannot mix Prompt-to-Prompt subclasses or method settings"
+                raise ValueError("A GPU edit batch cannot mix methods, P2P subclasses or settings")
+            with timing.measure("editor", device=self.editor.device):
+                edited = self.editor.edit_batch(
+                    [item.prepared.loaded.sample for item in items],
+                    [item.prepared.loaded.artifact for item in items],
+                    hooks=[item.prepared.hook for item in items],
+                    prompt_to_prompt_class=policy.policy_class,
+                    method_settings=policy.settings,
                 )
-            hooks = [
-                self._hook_for(method, item.artifact)
-                for method, item in zip(methods, items, strict=True)
-            ]
-            edited = self.editor.edit_batch(
-                [item.sample for item in items],
-                [item.artifact for item in items],
-                hooks=hooks,
-                prompt_to_prompt_class=policy_class,
-                method_settings=settings,
-            )
+            batch_seconds += timing.durations["editor"]
             if len(edited) != len(items):
                 raise RuntimeError("The editor returned a different number of results.")
-            batch_seconds = time.perf_counter() - started
             records: list[dict[str, Any]] = []
-            for item, result in zip(items, edited, strict=True):
-                reconstructed_path, edited_path = self._run_output.save_images(
-                    item.artifact.method_id,
-                    item.artifact.sample_uid,
-                    item.ordinal,
-                    result.reconstructed,
-                    result.edited,
-                )
-                records.append(
-                    {
-                        "uid": item.artifact.sample_uid,
-                        "method_id": item.artifact.method_id,
-                        "artifact": str(item.artifact_path),
-                        "reconstructed_image": str(reconstructed_path.relative_to(self._run_output.output_dir)),
-                        "edited_image": str(edited_path.relative_to(self._run_output.output_dir)),
-                        "artifact_reused": item.artifact_reused,
-                        "inversion_seconds": item.inversion_seconds,
+            with timing.measure("image_write"):
+                for item, result in zip(items, edited, strict=True):
+                    artifact = item.prepared.loaded.artifact
+                    reconstructed_path, edited_path = output.save_images(
+                        artifact.method_id, artifact.sample_uid,
+                        result.reconstructed, result.edited,
+                    )
+                    records.append({
+                        **item.result_values(),
+                        "reconstructed_image": str(reconstructed_path.relative_to(output.output_dir)),
+                        "edited_image": str(edited_path.relative_to(output.output_dir)),
+                        "edit_batch_id": timing.batch_id,
                         "edit_batch_seconds": batch_seconds,
                         "status": "ok",
-                    }
-                )
+                    })
             for record in records:
                 self._record(record)
         except Exception as exc:
-            batch_seconds = time.perf_counter() - started
+            batch_seconds = timing.durations.get("preparation", 0.0) + timing.durations.get("editor", 0.0)
             for item in items:
-                self._record(
-                    {
-                        "uid": item.artifact.sample_uid,
-                        "method_id": item.artifact.method_id,
-                        "artifact": str(item.artifact_path),
-                        "artifact_reused": item.artifact_reused,
-                        "inversion_seconds": item.inversion_seconds,
-                        "edit_batch_seconds": batch_seconds,
-                        "status": "error",
-                        "error": str(exc),
-                    }
-                )
+                self._record({
+                    **item.result_values(),
+                    "edit_batch_id": timing.batch_id,
+                    "edit_batch_seconds": batch_seconds,
+                    "status": "error", "error": str(exc),
+                })
             raise
 
-    def edit_artifacts(self, artifact_paths: Sequence[Path]) -> Path:
-        """Replay each parameter file, recording incompatible pairs as skipped."""
-        discover_methods()
-        return self._sweep(lambda: self._edit_artifacts_for_config(artifact_paths))
-
-    def _edit_artifacts_for_config(self, artifact_paths: Sequence[Path]) -> None:
-        for path_batch in _chunks(artifact_paths, self.config.runtime.batch_size):
-            items: list[_WorkItem] = []
-            loaded_batch = self._fetch_many(self._load_artifact_result, path_batch)
-            for requested_path, loaded in zip(path_batch, loaded_batch, strict=True):
-                if isinstance(loaded, Exception):
-                    self._record(
-                        {
-                            "uid": None,
-                            "method_id": None,
-                            "artifact": str(requested_path.expanduser().resolve()),
-                            "artifact_reused": True,
-                            "status": "error",
-                            "error": str(loaded),
-                        }
-                    )
-                    raise loaded
-                artifact, artifact_path, sample = loaded
-                try:
-                    method = self._method_for(artifact)
-                    self._check_method_batch_size(method)
-                    self._prompt_to_prompt_for(method)
-                    method.validate_replay(artifact, self.inversion_context)
-                    self.editor.validate_artifact(artifact)
-                except ArtifactCompatibilityError as exc:
-                    self._record({
-                        "uid": artifact.sample_uid,
-                        "method_id": artifact.method_id,
-                        "artifact": str(artifact_path),
-                        "artifact_reused": True,
-                        "status": "skipped",
-                        "reason": str(exc),
-                    })
-                    continue
-                except Exception as exc:
-                    self._record({
-                        "uid": artifact.sample_uid,
-                        "method_id": artifact.method_id,
-                        "artifact": str(artifact_path),
-                        "artifact_reused": True,
-                        "status": "error",
-                        "error": str(exc),
-                    })
-                    raise
-                items.append(
-                    _WorkItem(
-                        artifact=artifact,
-                        artifact_path=artifact_path,
-                        sample=sample,
-                        ordinal=self._allocate_ordinal(),
-                    )
+    def _process_edit_references(
+        self, references: Sequence[ArtifactReference], *, allow_skip: bool,
+        inversions: Mapping[str, InversionRecord] | None = None,
+    ) -> None:
+        """Read and prepare one method segment of an existing editing chunk."""
+        output = self._output_for(references[0].path.parent.parent.name)
+        settings = self.artifact_settings
+        context = self.inversion_context
+        with output.batch("edit", len(references)) as timing:
+            timing.extra["edited_count"] = 0
+            with timing.measure("input_read"):
+                results = self._fetch_many(
+                    lambda reference: self._replay.load_result(reference, settings), references
                 )
-            self._edit_batch(items)
+            items: list[WorkItem] = []
+            with timing.measure("preparation"):
+                for result in results:
+                    reference = result.reference
+                    inversion = None if inversions is None else inversions[reference.sample_uid]
+                    values = self._reference_values(reference, inversion)
+                    try:
+                        if result.error is not None:
+                            raise result.error
+                        if result.loaded is None:
+                            raise RuntimeError("Artifact loading returned neither a value nor an error")
+                        prepared = self._replay.prepare(result.loaded, context)
+                    except ArtifactCompatibilityError as exc:
+                        if allow_skip:
+                            self._record({**values, "status": "skipped", "reason": str(exc)})
+                            continue
+                        self._record({
+                            **values, "edit_batch_id": timing.batch_id,
+                            "status": "error", "error": str(exc),
+                        })
+                        raise
+                    except Exception as exc:
+                        self._record({
+                            **values, "edit_batch_id": timing.batch_id,
+                            "status": "error", "error": str(exc),
+                        })
+                        raise
+                    items.append(WorkItem(prepared, inversion))
+                    timing.extra["edited_count"] = len(items)
+            self._edit_batch(items, timing)
 
-    def run_methods(self, method_ids: Sequence[str], uids: Sequence[str]) -> Path:
-        """Invert/reuse and edit all requested records for each parameter file."""
+    def edit_artifacts(self, artifact_references: Sequence[ArtifactReference]) -> Path:
+        """Replay each parameter file, recording incompatible pairs as skipped."""
+        if not artifact_references:
+            raise ValueError("At least one saved inversion artifact is required.")
         discover_methods()
-        methods = [(method_id, get_method(method_id)) for method_id in method_ids]
-        for _, method in methods:
-            self._check_method_batch_size(method)
-            self._prompt_to_prompt_for(method)
-        if self._catalog is None:
-            self._catalog = ArtifactCatalog()
-        return self._sweep(lambda: self._run_methods_for_config(methods, uids))
+        method_ids = tuple(dict.fromkeys(
+            method_directory_name(reference.path.parent.parent.name)
+            for reference in artifact_references
+        ))
+        return self._sweep(
+            lambda: self._edit_artifacts_for_config(artifact_references), method_ids
+        )
+
+    def _edit_artifacts_for_config(self, artifact_references: Sequence[ArtifactReference]) -> None:
+        remaining = Counter(reference.path.parent.parent.name for reference in artifact_references)
+        self._output_for(artifact_references[0].path.parent.parent.name)
+        _ = self.editor
+        for path_batch in _chunks(artifact_references, self.config.runtime.batch_size):
+            # Preserve chunk and method boundaries while timing each method's reads once.
+            for method_id, group in groupby(path_batch, key=lambda ref: ref.path.parent.parent.name):
+                references = list(group)
+                self._process_edit_references(references, allow_skip=True)
+                remaining[method_id] -= len(references)
+                if not remaining[method_id] and method_id not in self._finished_methods:
+                    self._finish_method(method_id)
+
+    def run_methods(self, method_ids: Sequence[str]) -> Path:
+        """Preflight the complete sweep, then invert/reuse and edit the dataset."""
+        method_ids = _resolve_method_ids(method_ids)
+        uids = self._repository.uids
+        if not uids:
+            raise ValueError("The project dataset is empty.")
+        methods = [get_method(method_id) for method_id in method_ids]
+        self._preflight(methods)
+        try:
+            if self._components is None:
+                self._components = SharedInversionComponents(IntermediateCache())
+            if self._coordinator is None:
+                self._coordinator = InversionCoordinator(ArtifactCatalog(), self._replay)
+        except Exception as exc:
+            self._sweep_output.finish("error", str(exc))
+            raise
+        return self._sweep(lambda: self._run_methods_for_config(methods, uids), method_ids)
 
     def _run_methods_for_config(
-        self, methods: Sequence[tuple[str, InversionMethod]], uids: Sequence[str]
+        self, methods: Sequence[InversionMethod], uids: Sequence[str],
     ) -> None:
-        for method_id, method in methods:
-            for uid_batch in _chunks(uids, self.config.runtime.batch_size):
-                items: list[_WorkItem] = []
-                samples = self._fetch_many(self._sample, uid_batch)
-                for uid, sample in zip(uid_batch, samples, strict=True):
-                    started = time.perf_counter()
-                    artifact_path: Path | None = None
-                    artifact_reused = False
-                    try:
-                        artifact, artifact_path, artifact_reused = self._invert_or_reuse(
-                            method, sample, uid
-                        )
-                    except Exception as exc:
-                        self._record(
-                            {
-                                "uid": uid,
-                                "method_id": method_id,
-                                "artifact": str(artifact_path) if artifact_path else None,
-                                "artifact_reused": artifact_reused,
-                                "inversion_seconds": time.perf_counter() - started,
-                                "status": "error",
-                                "error": str(exc),
-                            }
-                        )
-                        raise
-                    inversion_seconds = (0.0 if artifact_reused
-                                         else time.perf_counter() - started)
-                    items.append(
-                        _WorkItem(
-                            artifact=artifact,
-                            artifact_path=artifact_path,
-                            sample=sample,
-                            ordinal=self._allocate_ordinal(),
-                            inversion_seconds=inversion_seconds,
-                            artifact_reused=artifact_reused,
-                        )
-                    )
-                self._edit_batch(items)
+        if self._coordinator is None:
+            raise RuntimeError("The inversion coordinator is not initialized")
+        context = self.inversion_context
+        settings = self.artifact_settings
+        for method in methods:
+            output = self._output_for(method.method_id)
+            timings: list[InversionRecord] = []
+            with ExitStack() as resources:
+                publication = None
+                for uid_batch in _chunks(uids, self.config.runtime.inversion_batch_size):
+                    with output.batch("inversion", len(uid_batch)) as timing:
+                        timing.extra.update(cache_hits=0, uncached_count=0)
+                        if publication is None:
+                            # The first lookup includes the published group's integrity check.
+                            with timing.measure("cache_lookup"):
+                                publication = resources.enter_context(self._coordinator.group(method, context))
+                        timings.extend(self._coordinator.invert_batch(
+                            method, uid_batch, publication, context, settings, output, timing,
+                            read_samples=lambda missing_uids: self._fetch_many(self._sample, missing_uids),
+                        ))
+                if publication is None:
+                    raise RuntimeError("An inversion group requires at least one batch")
+                self._coordinator.publish(publication, output, len(uids))
+                references = {record.uid: publication.reference(record.uid) for record in timings}
+            # Release staging files before the separately sized editing pass.
+            for timing_batch in _chunks(timings, self.config.runtime.batch_size):
+                self._process_edit_references(
+                    [references[record.uid] for record in timing_batch], allow_skip=False,
+                    inversions={record.uid: record for record in timing_batch},
+                )
+            self._finish_method(method.method_id)
 
 
-def edit_artifacts(
-    dataset_path: Path | None,
-    artifact_paths: Sequence[Path],
-    output_root: Path,
-    *,
-    pipeline_h_params_file: str | Path | None = None,
-) -> Path:
-    return WorkflowRunner(
-        dataset_path, output_root, pipeline_h_params_file=pipeline_h_params_file
-    ).edit_artifacts(
-        artifact_paths
+def edit_artifacts(artifact_id: str | None = None) -> Path:
+    """Replay one artifact ID or all saved artifacts across every parameter file."""
+    repository = ArtifactRepository()
+    artifact_references = (
+        repository.discover() if artifact_id is None else repository.resolve_all(artifact_id)
     )
+    return WorkflowRunner().edit_artifacts(artifact_references)
 
 
 def run_methods(
-    dataset_path: Path | None,
     method_ids: Sequence[str],
-    uids: Sequence[str],
-    output_root: Path,
     *,
     pipeline_h_params_file: str | Path | None = None,
 ) -> Path:
-    discover_methods()
-    for method_id in method_ids:
-        get_method(method_id)
+    """Invert and edit with unique requested methods; ALL selects every adapter."""
+    method_ids = _resolve_method_ids(method_ids)
     return WorkflowRunner(
-        dataset_path, output_root, pipeline_h_params_file=pipeline_h_params_file
-    ).run_methods(
-        method_ids, uids
-    )
+        pipeline_h_params_file=pipeline_h_params_file
+    ).run_methods(method_ids)

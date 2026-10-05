@@ -21,14 +21,16 @@ from .models import (
 )
 
 
-def _section(data: dict[str, Any], key: str, required: set[str]) -> dict[str, Any]:
+def _section(
+    data: dict[str, Any], key: str, required: set[str], *, optional: set[str] | None = None
+) -> dict[str, Any]:
     value = data[key]
     if not isinstance(value, dict):
         raise ConfigError(f"Section {key!r} must be a YAML mapping")
     if any(not isinstance(name, str) for name in value):
         raise ConfigError(f"Section {key!r} setting names must be strings")
     missing = required - value.keys()
-    extra = value.keys() - required
+    extra = value.keys() - required - (optional or set())
     if missing:
         raise ConfigError(f"Section {key!r} is missing: {', '.join(sorted(missing))}")
     if extra:
@@ -157,6 +159,7 @@ def load_config(pipeline_h_params_file: str | Path) -> ExperimentConfig:
             "num_workers",
             "pin_memory",
         },
+        optional={"inversion_batch_size"},
     )
 
     methods_data = data.get("methods", {})
@@ -227,6 +230,11 @@ def load_config(pipeline_h_params_file: str | Path) -> ExperimentConfig:
         device=device,
         dtype=_choice(runtime_data["dtype"], "runtime.dtype", {"float16", "float32", "bfloat16"}),
         batch_size=_integer(runtime_data["batch_size"], "runtime.batch_size", minimum=1),
+        inversion_batch_size=_integer(
+            runtime_data.get("inversion_batch_size", 1),
+            "runtime.inversion_batch_size",
+            minimum=1,
+        ),
         attention_query_chunk_size=_integer(
             runtime_data["attention_query_chunk_size"],
             "runtime.attention_query_chunk_size",

@@ -18,6 +18,7 @@ from .runtime import ModelRuntime
 
 if TYPE_CHECKING:
     from diffusers import DDIMScheduler, StableDiffusionPipeline
+    from PIL import Image
 
 
 class Editor:
@@ -39,6 +40,17 @@ class Editor:
         return self._runtime.inversion_cache_settings()
 
     @property
+    def model_content_identity(self) -> Mapping[str, Any]:
+        return self._runtime.model_content_identity
+
+    @property
+    def model_commit(self) -> str | None:
+        return self._runtime.model_commit
+
+    def component_content_identity(self, components: tuple[str, ...]) -> Mapping[str, Any]:
+        return self._runtime.component_content_identity(components)
+
+    @property
     def pipeline(self) -> StableDiffusionPipeline:
         return self._pipeline
 
@@ -50,11 +62,18 @@ class Editor:
     def expected_timesteps(self) -> tuple[int, ...]:
         return tuple(int(step) for step in self.scheduler.timesteps.tolist())
 
+    def timesteps_for_steps(self, num_inference_steps: int) -> tuple[int, ...]:
+        """Derive an artifact's schedule without changing the active scheduler."""
+        scheduler = type(self.scheduler).from_config(self.scheduler.config)
+        scheduler.set_timesteps(num_inference_steps, device="cpu")
+        return tuple(int(step) for step in scheduler.timesteps.tolist())
+
     @property
     def scheduler_config(self) -> dict[str, Any]:
         return normalize_scheduler_config(self.scheduler.config)
 
     def validate_artifact(self, artifact: InversionArtifact) -> None:
+        artifact.validate_terminal_latent()
         artifact.validate_compatibility(
             self.config,
             dataset_ref=artifact.dataset_ref,
@@ -76,8 +95,31 @@ class Editor:
         if tokens.input_ids.shape[-1] != tokenizer.model_max_length:
             raise ValueError("Caption exceeds the model's CLIP token limit")
         return self.pipeline.text_encoder(
-            tokens.input_ids.to(self.device)
+            self.to_device(tokens.input_ids)
         )[0]
+
+    def encode_images(self, images: Sequence[Image.Image]) -> torch.Tensor:
+        """Encode RGB sources in one VAE batch using the configured transfers."""
+        if not images:
+            raise ValueError("Image encoding requires at least one source image")
+        model = self.config.model
+        pixels = self.pipeline.image_processor.preprocess(
+            [image.convert("RGB") for image in images],
+            height=model.height,
+            width=model.width,
+        )
+        pixels = self.to_device(pixels, dtype=self.dtype)
+        latents = self.pipeline.vae.encode(pixels).latent_dist.mode()
+        latents = latents * self.pipeline.vae.config.scaling_factor
+        expected_shape = (len(images), 4, model.height // 8, model.width // 8)
+        if tuple(latents.shape) != expected_shape:
+            raise ValueError(
+                f"Image encoding expected latent shape {expected_shape}, "
+                f"got {tuple(latents.shape)}"
+            )
+        if not torch.isfinite(latents).all().item():
+            raise ValueError("Image encoding produced non-finite latents")
+        return latents.detach()
 
     @staticmethod
     def _check_hook_state(
@@ -184,16 +226,22 @@ class Editor:
         pair_seed = (seed + int.from_bytes(digest[:8], "little")) % (2**63 - 1)
         return torch.Generator(device=device).manual_seed(pair_seed)
 
-    def _prepare_latent(self, latent: torch.Tensor) -> torch.Tensor:
-        if self.device.type == "cuda" and latent.device.type == "cpu":
-            if self.config.runtime.pin_memory and not latent.is_pinned():
-                latent = latent.pin_memory()
-            return latent.to(
+    def to_device(
+        self, tensor: torch.Tensor, *, dtype: torch.dtype | None = None
+    ) -> torch.Tensor:
+        """Transfer model inputs; preserve dtype unless explicitly requested."""
+        if self.device.type == "cuda" and tensor.device.type == "cpu":
+            if self.config.runtime.pin_memory and not tensor.is_pinned():
+                tensor = tensor.pin_memory()
+            return tensor.to(
                 device=self.device,
-                dtype=self.dtype,
+                dtype=dtype,
                 non_blocking=self.config.runtime.pin_memory,
             )
-        return latent.to(device=self.device, dtype=self.dtype)
+        return tensor.to(device=self.device, dtype=dtype)
+
+    def _prepare_latent(self, latent: torch.Tensor) -> torch.Tensor:
+        return self.to_device(latent, dtype=self.dtype)
 
     def _install_processors(
         self, controller: PromptToPrompt
@@ -226,8 +274,11 @@ class Editor:
             raise ValueError("The loaded UNet has no controllable cross-attention layers")
         try:
             unet.set_attn_processor(dict(replacement))
-        except Exception:
-            unet.set_attn_processor(dict(original))
+        except BaseException as exc:
+            try:
+                unet.set_attn_processor(dict(original))
+            except BaseException as cleanup:
+                exc.add_note(f"Attention processor restoration failed: {cleanup}")
             raise
         return original
 
@@ -242,6 +293,34 @@ class Editor:
         method_settings: Mapping[str, Any] | None = None,
     ) -> list[EditResult]:
         """Denoise up to ``runtime.batch_size`` source/target pairs together."""
+        error: BaseException | None = None
+        try:
+            return self._edit_batch(
+                samples, artifacts, hooks,
+                prompt_to_prompt_class=prompt_to_prompt_class,
+                method_settings=method_settings,
+            )
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            try:
+                self.pipeline.maybe_free_model_hooks()
+            except BaseException as cleanup:
+                if error is None:
+                    raise
+                error.add_note(f"Model offload cleanup failed: {cleanup}")
+
+    def _edit_batch(
+        self,
+        samples: Sequence[Mapping[str, Any]],
+        artifacts: Sequence[InversionArtifact],
+        hooks: Sequence[DenoisingHook | None] | None,
+        *,
+        prompt_to_prompt_class: type[PromptToPrompt],
+        method_settings: Mapping[str, Any] | None,
+    ) -> list[EditResult]:
+        """Execute editing inside the public method's model cleanup boundary."""
         batch_size = len(samples)
         if not batch_size or batch_size > self.config.runtime.batch_size:
             raise ValueError(
@@ -313,6 +392,7 @@ class Editor:
         ]
 
         original_processors = self._install_processors(controller)
+        denoising_error: BaseException | None = None
         try:
             for step_index, timestep in enumerate(self.scheduler.timesteps):
                 step_number = int(timestep.item())
@@ -361,8 +441,16 @@ class Editor:
                     latents, prompt_embeddings, negative_prompt_embeddings,
                     None,
                 )
+        except BaseException as exc:
+            denoising_error = exc
+            raise
         finally:
-            self.pipeline.unet.set_attn_processor(dict(original_processors))
+            try:
+                self.pipeline.unet.set_attn_processor(dict(original_processors))
+            except BaseException as cleanup:
+                if denoising_error is None:
+                    raise
+                denoising_error.add_note(f"Attention processor restoration failed: {cleanup}")
 
         decoded = self.pipeline.vae.decode(
             latents / self.pipeline.vae.config.scaling_factor,

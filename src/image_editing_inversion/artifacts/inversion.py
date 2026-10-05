@@ -1,27 +1,16 @@
-"""Portable inversion artifact validation and serialization.
-
-Images, prompts, and masks remain in the dataset. Artifacts store the terminal
-latent and provenance needed to reproduce its denoising schedule.
-"""
+"""Per-image inversion state and compatibility validation."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 import json
 import math
-from pathlib import Path
 import re
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import torch
-from safetensors.torch import load_file, save_file
 
 
-_SCHEMA_VERSION = 1
-_METADATA_FILE = "artifact.json"
-_TENSORS_FILE = "tensors.safetensors"
-_TERMINAL_KEY = "terminal_latent"
-_STATE_PREFIX = "state/"
 _STATE_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]*$")
 
 
@@ -53,12 +42,18 @@ def _json_object(value: Mapping[str, Any], name: str) -> dict[str, Any]:
 
 
 def normalize_scheduler_config(value: Mapping[str, Any]) -> dict[str, Any]:
-    """Keep full scheduler settings while stabilizing unordered default metadata."""
+    """Keep scheduler settings without dependency-version identity."""
     config = _json_object(value, "scheduler_config")
-    defaults = config.get("_use_default_values")
-    # Diffusers constructs these names from a set; order has no scheduling meaning.
-    if isinstance(defaults, list) and all(isinstance(name, str) for name in defaults):
-        config["_use_default_values"] = sorted(defaults)
+    for name in ("_diffusers_version", "_use_default_values", "_class_name", "_name_or_path"):
+        config.pop(name, None)
+    if not config.get("clip_sample", True):
+        config.pop("clip_sample_range", None)
+    if not config.get("thresholding", False):
+        for name in ("dynamic_thresholding_ratio", "sample_max_value"):
+            config.pop(name, None)
+    if config.get("trained_betas") is not None:
+        for name in ("beta_start", "beta_end", "beta_schedule"):
+            config.pop(name, None)
     return config
 
 
@@ -82,11 +77,56 @@ def _timesteps_tuple(values: Sequence[int] | torch.Tensor) -> tuple[int, ...]:
     return tuple(values)
 
 
-def _tensor_manifest(tensors: Mapping[str, torch.Tensor]) -> dict[str, dict[str, Any]]:
-    return {
-        key: {"shape": list(tensor.shape), "dtype": str(tensor.dtype)}
-        for key, tensor in tensors.items()
-    }
+@dataclass(frozen=True, slots=True)
+class ArtifactProvenance:
+    """Actual production inputs beyond the artifact's model/dataset/schedule fields."""
+
+    model_content: Mapping[str, Any]
+    dataset_content: str | None
+    numerics: Mapping[str, Any]
+    method_parameters: Mapping[str, Any] | None = None
+    guidance_scale: float | None = None
+    model_commit: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "model_content", _json_object(self.model_content, "model_content"))
+        object.__setattr__(self, "numerics", _json_object(self.numerics, "numerics"))
+        _optional_string(self.model_commit, "model_commit")
+        if self.dataset_content is not None and (
+            not isinstance(self.dataset_content, str)
+            or re.fullmatch(r"[0-9a-f]{64}", self.dataset_content) is None
+        ):
+            raise ValueError("dataset_content must be a SHA-256 digest or None")
+        if self.method_parameters is not None:
+            object.__setattr__(self, "method_parameters", _json_object(self.method_parameters, "method_parameters"))
+        if self.guidance_scale is not None:
+            if (isinstance(self.guidance_scale, bool)
+                    or not isinstance(self.guidance_scale, (int, float))
+                    or not math.isfinite(self.guidance_scale) or self.guidance_scale < 0):
+                raise ValueError("Saved guidance_scale must be finite and nonnegative")
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactSettings:
+    """Expected current inputs, never a substitute for saved production metadata."""
+
+    model_id: str
+    model_revision: str | None
+    dataset_ref: str
+    dataset_fingerprint: str | None
+    scheduler_config: Mapping[str, Any]
+    eta: float
+    timesteps_for_steps: Callable[[int], Sequence[int]]
+    scheduler_id: str = "ddim"
+    model_content: Mapping[str, Any] | None = None
+    dataset_content: str | None = None
+    numerics: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("model_content", "numerics"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, _json_object(value, name))
 
 
 @dataclass(slots=True)
@@ -110,6 +150,7 @@ class InversionArtifact:
     timesteps: tuple[int, ...]
     terminal_latent: torch.Tensor
     per_step_state: Mapping[str, torch.Tensor] = field(default_factory=dict)
+    provenance: ArtifactProvenance | None = None
 
     def __post_init__(self) -> None:
         self.method_id = _required_string(self.method_id, "method_id")
@@ -128,12 +169,9 @@ class InversionArtifact:
         if not math.isfinite(self.eta) or self.eta < 0:
             raise ValueError("eta must be a finite non-negative number")
         self.timesteps = _timesteps_tuple(self.timesteps)
-        if not isinstance(self.terminal_latent, torch.Tensor):
-            raise ValueError("terminal_latent must be a PyTorch tensor")
-        if self.terminal_latent.ndim != 4 or self.terminal_latent.shape[:2] != (1, 4):
-            raise ValueError("terminal_latent must have shape [1, 4, height, width]")
-        if not self.terminal_latent.is_floating_point():
-            raise ValueError("terminal_latent must use a floating-point dtype")
+        if self.provenance is not None and not isinstance(self.provenance, ArtifactProvenance):
+            raise TypeError("Artifact provenance must be ArtifactProvenance or None")
+        self.validate_terminal_latent()
         if not isinstance(self.per_step_state, Mapping):
             raise ValueError("per_step_state must be a mapping")
         for key, tensor in self.per_step_state.items():
@@ -149,10 +187,84 @@ class InversionArtifact:
                     f"per_step_state[{key!r}] must have one entry per timestep"
                 )
 
+    def validate_terminal_latent(self) -> None:
+        """Reject malformed or non-finite terminal state without loading other entries."""
+        if not isinstance(self.terminal_latent, torch.Tensor):
+            raise ValueError("terminal_latent must be a PyTorch tensor")
+        if (
+            self.terminal_latent.ndim != 4
+            or self.terminal_latent.shape[:2] != (1, 4)
+            or min(self.terminal_latent.shape[2:]) < 1
+        ):
+            raise ValueError("terminal_latent must have shape [1, 4, height, width] with positive dimensions")
+        if not self.terminal_latent.is_floating_point():
+            raise ValueError("terminal_latent must use a floating-point dtype")
+        if not torch.isfinite(self.terminal_latent).all().item():
+            raise ValueError("terminal_latent must contain only finite values")
+
     @property
     def requires_denoising_hook(self) -> bool:
         """Whether method-specific state must be interpreted during editing."""
         return bool(self.per_step_state)
+
+    def metadata(self) -> dict[str, Any]:
+        """Serialize only identity and production settings, without copying tensors."""
+        return {
+            "method_id": self.method_id, "sample_uid": self.sample_uid,
+            "model_id": self.model_id, "model_revision": self.model_revision,
+            "dataset_ref": self.dataset_ref, "dataset_fingerprint": self.dataset_fingerprint,
+            "scheduler_id": self.scheduler_id, "scheduler_config": dict(self.scheduler_config),
+            "eta": self.eta, "timesteps": list(self.timesteps),
+            "provenance": None if self.provenance is None else asdict(self.provenance),
+        }
+
+    @staticmethod
+    def validate_metadata(value: Mapping[str, Any]) -> dict[str, Any]:
+        """Validate a saved identity without loading its tensor payload."""
+        value = _json_object(value, "artifact metadata")
+        if set(value) != {
+            "method_id", "sample_uid", "model_id", "model_revision", "dataset_ref",
+            "dataset_fingerprint", "scheduler_id", "scheduler_config", "eta", "timesteps", "provenance",
+        }:
+            raise ValueError("Invalid artifact production metadata fields")
+        for name in ("method_id", "sample_uid", "model_id", "dataset_ref", "scheduler_id"):
+            _required_string(value[name], name)
+        for name in ("model_revision", "dataset_fingerprint"):
+            _optional_string(value[name], name)
+        value["scheduler_config"] = normalize_scheduler_config(value["scheduler_config"])
+        value["timesteps"] = list(_timesteps_tuple(value["timesteps"]))
+        eta = value["eta"]
+        if isinstance(eta, bool) or not isinstance(eta, (int, float)) or not math.isfinite(eta) or eta < 0:
+            raise ValueError("Saved eta must be finite and nonnegative")
+        if value["provenance"] is not None:
+            provenance = value["provenance"]
+            if not isinstance(provenance, dict) or set(provenance) != {
+                "model_content", "dataset_content", "numerics", "method_parameters", "guidance_scale", "model_commit",
+            }:
+                raise ValueError("Invalid artifact provenance fields")
+            value["provenance"] = asdict(ArtifactProvenance(**provenance))
+        return value
+
+    def validate_settings(self, settings: ArtifactSettings, *, steps: int) -> None:
+        """Check saved identity against independently supplied current inputs."""
+        mismatches = []
+        for name, expected in (
+            ("model_id", settings.model_id), ("model_revision", settings.model_revision),
+            ("dataset_ref", settings.dataset_ref), ("dataset_fingerprint", settings.dataset_fingerprint),
+            ("scheduler_id", settings.scheduler_id),
+            ("scheduler_config", normalize_scheduler_config(settings.scheduler_config)),
+            ("timesteps", _timesteps_tuple(settings.timesteps_for_steps(steps))),
+        ):
+            if getattr(self, name) != expected:
+                mismatches.append(name)
+        if not math.isclose(self.eta, settings.eta, rel_tol=0, abs_tol=1e-9):
+            mismatches.append("eta")
+        for name in ("model_content", "dataset_content", "numerics"):
+            expected = getattr(settings, name)
+            if expected is not None and (self.provenance is None or getattr(self.provenance, name) != expected):
+                mismatches.append(name)
+        if mismatches:
+            raise ArtifactCompatibilityError("Saved artifact inputs differ from this run: " + ", ".join(mismatches))
 
     def validate_compatibility(
         self,
@@ -198,105 +310,3 @@ class InversionArtifact:
                 "Inversion artifact is incompatible with this run: "
                 + ", ".join(mismatches)
             )
-
-    def save(self, path: str | Path) -> Path:
-        """Write JSON metadata and pickle-free safetensors into ``path``."""
-        directory = Path(path)
-        if directory.exists() and not directory.is_dir():
-            raise ValueError(f"Artifact path is not a directory: {directory}")
-        directory.mkdir(parents=True, exist_ok=True)
-        metadata_path = directory / _METADATA_FILE
-        tensors_path = directory / _TENSORS_FILE
-        if metadata_path.exists() or tensors_path.exists():
-            raise FileExistsError(f"Artifact already exists at {directory}")
-
-        tensors = {_TERMINAL_KEY: self.terminal_latent}
-        tensors.update(
-            {_STATE_PREFIX + key: tensor for key, tensor in self.per_step_state.items()}
-        )
-        tensors = {
-            key: tensor.detach().to(device="cpu").contiguous()
-            for key, tensor in tensors.items()
-        }
-        metadata = {
-            "schema_version": _SCHEMA_VERSION,
-            "method_id": self.method_id,
-            "model_id": self.model_id,
-            "model_revision": self.model_revision,
-            "dataset_ref": self.dataset_ref,
-            "dataset_fingerprint": self.dataset_fingerprint,
-            "sample_uid": self.sample_uid,
-            "scheduler_id": self.scheduler_id,
-            "scheduler_config": self.scheduler_config,
-            "eta": self.eta,
-            "timesteps": list(self.timesteps),
-            "tensors": _tensor_manifest(tensors),
-        }
-        save_file(tensors, str(tensors_path))
-        metadata_path.write_text(
-            json.dumps(metadata, indent=2, sort_keys=True, allow_nan=False) + "\n",
-            encoding="utf-8",
-        )
-        return directory
-
-    @classmethod
-    def load(cls, path: str | Path) -> InversionArtifact:
-        """Load and validate a schema-v1 artifact without deserializing pickle."""
-        directory = Path(path)
-        metadata_path = directory / _METADATA_FILE
-        tensors_path = directory / _TENSORS_FILE
-        try:
-            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError(f"Cannot read inversion artifact metadata at {directory}") from exc
-        if not isinstance(metadata, dict) or metadata.get("schema_version") != _SCHEMA_VERSION:
-            raise ValueError(f"Unsupported inversion artifact schema at {directory}")
-        expected_fields = {
-            "schema_version",
-            "method_id",
-            "model_id",
-            "model_revision",
-            "dataset_ref",
-            "dataset_fingerprint",
-            "sample_uid",
-            "scheduler_id",
-            "scheduler_config",
-            "eta",
-            "timesteps",
-            "tensors",
-        }
-        if set(metadata) != expected_fields:
-            raise ValueError(f"Invalid inversion artifact metadata fields at {directory}")
-        try:
-            tensors = load_file(str(tensors_path), device="cpu")
-        except Exception as exc:
-            raise ValueError(f"Cannot read inversion artifact tensors at {directory}") from exc
-        manifest = metadata["tensors"]
-        if not isinstance(manifest, dict) or set(manifest) != set(tensors):
-            raise ValueError(f"Inversion artifact tensor manifest mismatch at {directory}")
-        if manifest != _tensor_manifest(tensors) or _TERMINAL_KEY not in tensors:
-            raise ValueError(f"Inversion artifact tensor shape or dtype mismatch at {directory}")
-        state = {}
-        for key, tensor in tensors.items():
-            if key == _TERMINAL_KEY:
-                continue
-            if not key.startswith(_STATE_PREFIX):
-                raise ValueError(f"Unexpected inversion artifact tensor key {key!r}")
-            state[key[len(_STATE_PREFIX) :]] = tensor
-        try:
-            return cls(
-                method_id=metadata["method_id"],
-                model_id=metadata["model_id"],
-                model_revision=metadata["model_revision"],
-                dataset_ref=metadata["dataset_ref"],
-                dataset_fingerprint=metadata["dataset_fingerprint"],
-                sample_uid=metadata["sample_uid"],
-                scheduler_id=metadata["scheduler_id"],
-                scheduler_config=metadata["scheduler_config"],
-                eta=metadata["eta"],
-                timesteps=metadata["timesteps"],
-                terminal_latent=tensors[_TERMINAL_KEY],
-                per_step_state=state,
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(f"Invalid inversion artifact at {directory}: {exc}") from exc
