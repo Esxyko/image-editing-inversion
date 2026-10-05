@@ -65,5 +65,25 @@ saved shards so first and later invocations identify the same files.
 Dataset-building code is retained only in the ignored local archive. The runtime
 package loads the assembled dataset; it does not rebuild captions or benchmark records.
 
+## Source selection
+
+`diffuse --dataset pie-bench` and `diffuse --dataset magic-brush` select records
+from the combined dataset. Omitting the argument processes every record.
+Python callers can pass the same values as the optional `dataset` keyword to
+`run_methods` or `WorkflowRunner.run_methods`; the default is `None`.
+
+`DatasetRepository.select_uids(dataset)` returns the selected UIDs in their
+existing dataset order without decoding images. PIE-Bench UIDs contain no colon;
+MagicBrush UIDs use `<img_id>:<turn_index>` and contain a colon. Unsupported
+selectors raise `ValueError`. A workflow with no matching records fails before
+model loading with an error identifying the selected source.
+
+Selection applies to inversion, reconstruction, and editing across all selected
+methods and parameter files. It does not modify the five-column dataset, UID
+index, fingerprint, or content digest. Full and filtered runs share cache
+identities; artifact publication preserves existing records from other sources.
+The top-level `dataset` field in `sweep.json` records the selector, or `null` for
+an unfiltered invocation. Saved-artifact replay has no source selector.
+
 See [README](../README.md) for setup and [artifact reuse](artifacts.md#cache-reuse)
 for how dataset identity affects inversion caching.

@@ -39,7 +39,7 @@ Each pipeline YAML requires:
 
 ```yaml
 sampling:
-  num_inference_steps: 50
+  num_inference_steps: 30
   guidance_scale: 7.5
 prompt_to_prompt:
   cross_replace_fraction: 0.4
@@ -51,7 +51,7 @@ Steps must be positive, guidance finite and nonnegative, and fractions within
 P2P `auto` selects replacement for equal whitespace-word counts and refinement
 otherwise. Method-specific P2P extras do not override shared mode or fractions.
 
-Checked-in batch sizes are **2** source images for inversion and **4** image
+Checked-in batch sizes are **2** source images for inversion and **8** image
 pairs for editing. The stages are independent; an editing batch of `N` pairs
 contains `N` source and `N` target branches. Omitted `inversion_batch_size`
 defaults to `1`. Reduce batches for smaller GPUs; CPU offload and attention
@@ -82,6 +82,18 @@ command-line order, duplicates run once, and `ALL` expands IDs in sorted order.
 Only uppercase `ALL` is reserved. `--h-params ALL` processes filenames in sorted
 order, completing every selected method for one file before the next.
 
+Use `--dataset pie-bench` or `--dataset magic-brush` to invert, reconstruct,
+and edit only records from that source across every selected method and parameter
+file. Omit it to process the entire combined dataset:
+
+```powershell
+uv run diffuse --method ddim --h-params default.yaml --dataset pie-bench
+uv run diffuse --method ddim --h-params default.yaml --dataset magic-brush
+```
+
+The top-level `dataset` field in `sweep.json` records this selection, or `null`
+when omitted. Source filtering retains the combined dataset's cache identity.
+
 Python callers can use the same workflow:
 
 ```python
@@ -89,6 +101,14 @@ from image_editing_inversion.workflows import run_methods
 
 run_dir = run_methods(["ddim", "null-text"], pipeline_h_params_file="default.yaml")
 print(run_dir)
+```
+
+Both `run_methods` and `WorkflowRunner.run_methods` accept the optional keyword
+`dataset="pie-bench"` or `dataset="magic-brush"`; `None` selects every record.
+Unsupported values raise `ValueError` before an execution session is created.
+
+```python
+run_dir = run_methods(["ddim"], pipeline_h_params_file="default.yaml", dataset="magic-brush")
 ```
 
 ## Replay saved inversions
@@ -113,7 +133,7 @@ data/
 |-- cache/inversion/                 # Per-image source encodings and conditional pivots
 |-- artifacts/
 |   |-- catalog.json
-|   `-- <method>/steps-50_guidance-7.5/
+|   `-- <method>/steps-30_guidance-7.5/
 |       |-- h-params.json
 |       `-- artifacts.safetensors
 `-- output/<run-id>/

@@ -1,6 +1,6 @@
 # Pipeline settings shared by every method in this parameter-file run.
 sampling:
-  num_inference_steps: 25
+  num_inference_steps: 20
   guidance_scale: 7.5
 
 prompt_to_prompt:

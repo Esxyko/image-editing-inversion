@@ -9,7 +9,7 @@ from datasets import Dataset
 from .identity import DatasetContentIdentity
 from .._project import project_paths
 from .loader import load_project_dataset
-from .schema import HUB_DATASET_REF, REQUIRED_COLUMNS
+from .schema import HUB_DATASET_REF, REQUIRED_COLUMNS, validate_dataset_source
 
 
 class DatasetRepository:
@@ -47,6 +47,14 @@ class DatasetRepository:
     def uids(self) -> tuple[str, ...]:
         """Return every UID in dataset order without materializing images."""
         return tuple(self._uid_to_index)
+
+    def select_uids(self, dataset: str | None = None) -> tuple[str, ...]:
+        """Select source UIDs in dataset order without changing dataset identity."""
+        validate_dataset_source(dataset)
+        if dataset is None:
+            return self.uids
+        magic_brush = dataset == "magic-brush"
+        return tuple(uid for uid in self._uid_to_index if (":" in uid) == magic_brush)
 
     def sample(self, uid: str) -> Mapping[str, Any]:
         """Return a sample for a UID, rejecting identifiers outside the dataset."""

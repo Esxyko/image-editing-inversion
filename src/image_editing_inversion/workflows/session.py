@@ -14,6 +14,7 @@ from ..artifacts.layout import method_directory_name
 from ..config import ExperimentConfig, discover_pipeline_h_params
 from ..config.loader import ConfigurationLoader
 from ..data import DatasetRepository
+from ..data.schema import validate_dataset_source
 from ..inversion import InversionContext, InversionMethod, get_method
 from ..inversion.components import SharedInversionComponents
 from .editing import EditingCoordinator
@@ -41,7 +42,11 @@ def _chunks(items: Iterable[Any], size: int) -> Iterable[list[Any]]:
 class WorkflowSession:
     """Keep execution state private and discard it after each invocation."""
 
-    def __init__(self, pipeline_h_params_file: str | Path | None) -> None:
+    def __init__(
+        self, pipeline_h_params_file: str | Path | None, *, dataset: str | None = None,
+    ) -> None:
+        validate_dataset_source(dataset)
+        self._dataset_source = dataset
         loader = ConfigurationLoader()
         self._parameter_configs = tuple(
             (path, loader.load(path)) for path in discover_pipeline_h_params(pipeline_h_params_file)
@@ -49,7 +54,9 @@ class WorkflowSession:
         self.config = self._parameter_configs[0][1]
         for _, config in self._parameter_configs:
             config.validate_hardware()
-        self._sweep_output = SweepOutput([path for path, _ in self._parameter_configs])
+        self._sweep_output = SweepOutput(
+            [path for path, _ in self._parameter_configs], dataset=self._dataset_source,
+        )
         self.output_dir = self._sweep_output.output_dir
         self._outputs: dict[str, RunOutput] = {}
         self._finished_methods: set[str] = set()
@@ -150,8 +157,10 @@ class WorkflowSession:
             preflight = SweepPreflight(self._parameter_configs, methods, self._sweep_output)
             preflight.configuration()
             self._load_dataset()
-            uids = self.repository.uids
+            uids = self.repository.select_uids(self._dataset_source)
             if not uids:
+                if self._dataset_source is not None:
+                    raise ValueError(f"No project records found for dataset source {self._dataset_source!r}.")
                 raise ValueError("The project dataset is empty.")
             preflight.runtime(self._activate_configuration, lambda: self.inversion_context)
             self._components = SharedInversionComponents(IntermediateCache())

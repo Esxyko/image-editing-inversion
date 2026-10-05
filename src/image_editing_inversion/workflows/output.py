@@ -37,12 +37,13 @@ def _write_json(path: Path, values: Mapping[str, Any]) -> None:
 class SweepOutput:
     """Own one invocation's directory and parameter/method manifest."""
 
-    def __init__(self, parameter_files: Sequence[Path]) -> None:
+    def __init__(self, parameter_files: Sequence[Path], *, dataset: str | None = None) -> None:
         run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid4().hex[:8]
         self.output_dir = project_paths().output.resolve() / run_id
         self.output_dir.mkdir(parents=True, exist_ok=False)
         self._manifest: dict[str, Any] = {
             "schema_version": 2,
+            "dataset": dataset,
             "status": "pending",
             "parameter_files": [
                 {"pipeline_h_params_file": path.name, "directory": path.name,

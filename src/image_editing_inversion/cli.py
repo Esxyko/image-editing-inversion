@@ -8,7 +8,7 @@ from typing import Callable, Sequence
 
 def build_diffuse_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="diffuse", description="Invert, reconstruct, and edit the entire project dataset."
+        prog="diffuse", description="Invert, reconstruct, and edit project dataset records."
     )
     parser.add_argument(
         "--method", action="append", required=True, metavar="METHOD|ALL",
@@ -19,6 +19,11 @@ def build_diffuse_parser() -> argparse.ArgumentParser:
         required=True,
         metavar="FILENAME|ALL",
         help="YAML filename inside pipeline_h_params/, or ALL to run every file sequentially.",
+    )
+    parser.add_argument(
+        "--dataset",
+        choices=("pie-bench", "magic-brush"),
+        help="Only process records from this source dataset; omitted processes every record.",
     )
     return parser
 
@@ -40,6 +45,8 @@ def diffuse(argv: Sequence[str] | None = None) -> int:
         from .workflows import run_methods
 
         parameter_file = None if args.h_params == "ALL" else args.h_params
-        return run_methods(args.method, pipeline_h_params_file=parameter_file)
+        return run_methods(
+            args.method, pipeline_h_params_file=parameter_file, dataset=args.dataset,
+        )
 
     return _execute(action)

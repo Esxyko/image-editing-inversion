@@ -8,7 +8,7 @@ and step/guidance group:
 ```text
 data/artifacts/
 |-- catalog.json
-`-- <method>/steps-50_guidance-7.5/
+`-- <method>/steps-30_guidance-7.5/
     |-- h-params.json
     `-- artifacts.safetensors
 ```
@@ -331,10 +331,24 @@ when the method changes.
 Both workflows use the private project Hub dataset loader described above.
 New artifacts use that dataset's shared identity and resolve their sample UID
 against it.
+
+For fresh inversions, `diffuse --dataset pie-bench` or `--dataset magic-brush`
+limits inversion, reconstruction, and editing to that source. Python
+`run_methods` and `WorkflowRunner.run_methods` accept the same optional `dataset`
+keyword. Filtering retains the combined dataset's fingerprint and content digest,
+so selected samples can reuse artifacts from full runs. Publication merges the
+selected artifacts into the existing group and preserves other sources' entries.
+
 `edit_artifacts` accepts no configuration or directory overrides and processes every pipeline
 parameter file. Results are written under `data/output/<run-id>/` with a
 schema-v2 `sweep.json` manifest and `<parameter-file>/<method>/` children containing
 `results.jsonl`, `batches.jsonl`, `resolved-config.json`, and images per sample under `images/`.
+
+The manifest includes a top-level `dataset` field from its initial creation:
+`"pie-bench"` or `"magic-brush"` for a selected source, and `null` when the
+argument is omitted or the workflow replays saved artifacts. The field is
+preserved in successful and failed runs; `schema_version` remains `2`.
+
 Run
 records contain UIDs, combined artifact paths, and artifact indices rather than
 prompts, source images, or masks.

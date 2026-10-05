@@ -8,7 +8,7 @@ The dataset mask is reserved for metrics and does not constrain editing.
 
 The defaults in the tables below are **implementation defaults for omitted keys**.
 The checked-in ReNoise YAML instead uses one refinement, a cap of one, and windows
-`[0, 2]` / `[1, 2]`. The checked-in inversion/editing batch sizes are **2/4**.
+`[0, 2]` / `[1, 2]`. The checked-in inversion/editing batch sizes are **2/8**.
 Refresh entry-point metadata with `uv sync` after changing an installation.
 
 ## Baseline DDIM inversion

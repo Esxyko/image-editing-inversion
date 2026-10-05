@@ -21,9 +21,9 @@ runtime:
   # Starting point for a 32 GB VRAM GPU at the configured 512x512 resolution.
   device: cuda
   dtype: float16
-  batch_size: 4
+  batch_size: 8 # Source/target pairs per editing batch.
   inversion_batch_size: 2 # Source images per inversion batch; allows room for Null-text gradients.
-  attention_query_chunk_size: 1024
+  attention_query_chunk_size: 4096
   cpu_offload: none # "none", "model", or "sequential"
   vae_slicing: true
   vae_tiling: false
