@@ -43,5 +43,7 @@ def inverse_scheduler(context: InversionContext, label: str) -> DDIMInverseSched
 
 
 def require_finite(tensor: torch.Tensor, name: str, label: str) -> None:
+    import torch
+
     if not torch.isfinite(tensor).all().item():
         raise ValueError(f"{label} inversion produced non-finite {name}")
