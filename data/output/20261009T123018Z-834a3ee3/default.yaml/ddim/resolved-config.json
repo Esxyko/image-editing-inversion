@@ -1,0 +1,39 @@
+{
+  "config": {
+    "methods": {},
+    "model": {
+      "height": 512,
+      "model_id": "stable-diffusion-v1-5/stable-diffusion-v1-5",
+      "revision": "451f4fe16113bff5a5d2269ed5ad43b0592e9a14",
+      "width": 512
+    },
+    "prompt_to_prompt": {
+      "cross_replace_fraction": 0.4,
+      "mode": "auto",
+      "self_replace_fraction": 0.6
+    },
+    "runtime": {
+      "attention_query_chunk_size": 4096,
+      "batch_size": 8,
+      "cpu_offload": "none",
+      "device": "cuda",
+      "dtype": "float16",
+      "inversion_batch_size": 2,
+      "num_workers": 0,
+      "pin_memory": true,
+      "vae_slicing": true,
+      "vae_tiling": false
+    },
+    "sampling": {
+      "eta": 0.0,
+      "guidance_scale": 7.5,
+      "num_inference_steps": 30,
+      "seed": 42
+    }
+  },
+  "dataset_fingerprint": "55eded19484e56b4",
+  "dataset_location": "beatle-ju1ce/image-editing-inversion",
+  "dataset_ref": "beatle-ju1ce/image-editing-inversion",
+  "method_id": "ddim",
+  "pipeline_h_params_file": "default.yaml"
+}

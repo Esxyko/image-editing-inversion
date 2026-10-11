@@ -47,9 +47,15 @@ class ModelRuntime:
             config.sampling.num_inference_steps, device=self.device
         )
         if config.runtime.vae_slicing:
-            pipeline.enable_vae_slicing()
+            if hasattr(pipeline, "enable_vae_slicing"):
+                pipeline.enable_vae_slicing()
+            else:
+                pipeline.vae.enable_slicing()
         if config.runtime.vae_tiling:
-            pipeline.enable_vae_tiling()
+            if hasattr(pipeline, "enable_vae_tiling"):
+                pipeline.enable_vae_tiling()
+            else:
+                pipeline.vae.enable_tiling()
         if config.runtime.cpu_offload == "none":
             pipeline.to(self.device)
         else:

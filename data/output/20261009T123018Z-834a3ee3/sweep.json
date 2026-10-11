@@ -1,0 +1,29 @@
+{
+  "dataset": null,
+  "parameter_files": [
+    {
+      "counts": {
+        "error": 0,
+        "ok": 5296,
+        "skipped": 0
+      },
+      "directory": "default.yaml",
+      "methods": [
+        {
+          "counts": {
+            "error": 0,
+            "ok": 5296,
+            "skipped": 0
+          },
+          "directory": "default.yaml/ddim",
+          "method_id": "ddim",
+          "status": "ok"
+        }
+      ],
+      "pipeline_h_params_file": "default.yaml",
+      "status": "ok"
+    }
+  ],
+  "schema_version": 2,
+  "status": "ok"
+}
