@@ -15,7 +15,7 @@ Configuration and storage locations are fixed relative to `src/`.
 |   |-- methods.md                  # Algorithms, restrictions, hyperparameters
 |   |-- artifacts.md                # Storage, caches, replay, timing
 |   `-- adapters.md                 # Extension contracts and API migration
-|-- pyproject.toml                  # Dependencies, diffuse, method entry points
+|-- pyproject.toml                  # Dependencies, CLI and method entry points
 |-- config.yaml                     # Shared experiment configuration
 |-- pipeline_h_params/default.yaml  # Sampling and attention sweep parameters
 |-- method_h_params/
@@ -23,7 +23,7 @@ Configuration and storage locations are fixed relative to `src/`.
 |   `-- ReNoise.yaml
 |-- .env.example                    # HF_TOKEN template; .env is ignored
 `-- src/image_editing_inversion/
-    |-- __init__.py, cli.py          # diffuse export and command parsing
+    |-- __init__.py, cli.py          # diffuse/experiment exports and command parsing
     |-- _project.py                 # Internal source-relative fixed paths
     |-- config/
     |   |-- models.py               # Validated settings and hardware checks
@@ -91,8 +91,9 @@ but is excluded from serialization and cache matching.
    resolved configurations for the selected pipeline files.
 2. Create the sweep manifest and one fresh adapter per selected method. For
    inversion, validate all configuration/method combinations before loading data.
-3. Load the fixed project dataset, then load one model and validate each resolved
-   scheduler. Replay uses saved state without inversion preflight or method parameter files.
+3. Load the fixed project dataset. For inversion, filter UIDs by source, then apply
+   the optional sample limit in dataset order. Load one model and validate each
+   resolved scheduler. Replay uses saved state without inversion preflight or method parameter files.
 4. Process parameter files sequentially. For each inversion method, resolve cache
    hits before reading missing samples, stage batches, and publish the complete group.
 5. Read published artifacts in independently sized editing batches; validate, prepare
@@ -106,6 +107,14 @@ state are not shared across calls. Session collaborators receive explicit inputs
 and never import or retain the runner. `ReplayPreparer` uses the session's adapters
 for both fresh inversions and saved artifacts. Stable cache inputs are resolved
 once per method/configuration context and combined with each UID.
+
+`experiment` requires one pipeline parameter file and a positive `--nsamples`,
+rejects `--h-params ALL`, and invokes the shared workflow with every discovered
+method. `run_methods` and `WorkflowRunner.run_methods` accept optional `dataset`
+and `nsamples` keywords, validated before session creation. Each method processes
+the same selected UID prefix; selection retains dataset/cache identities and
+publication preserves artifacts outside that prefix. Limited invocations record
+their requested `nsamples` in the schema-v2 sweep manifest; unlimited runs omit it.
 
 ## Fixed storage layout
 

@@ -85,5 +85,15 @@ identities; artifact publication preserves existing records from other sources.
 The top-level `dataset` field in `sweep.json` records the selector, or `null` for
 an unfiltered invocation. Saved-artifact replay has no source selector.
 
+`experiment --h-params default.yaml --nsamples N` runs every discovered method
+on the first `N` records in dataset order, optionally selecting a source with
+`--dataset` first. Python `run_methods` and `WorkflowRunner.run_methods` accept
+the same limit through the optional `nsamples` keyword. The count must be a
+positive integer; `None` selects all matching records. Counts exceeding the
+available records select all of them. Each MagicBrush turn counts as one record.
+This limit applies before batching and cache lookup, so cached records count
+toward it. Every method processes the same prefix with the combined dataset's
+identity, and artifacts outside the prefix are preserved.
+
 See [README](../README.md) for setup and [artifact reuse](artifacts.md#cache-reuse)
 for how dataset identity affects inversion caching.

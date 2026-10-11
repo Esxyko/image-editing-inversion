@@ -13,6 +13,7 @@ from ..artifacts import ArtifactCatalog, ArtifactReference, ArtifactSettings, In
 from ..artifacts.layout import method_directory_name
 from ..config import ExperimentConfig, discover_pipeline_h_params
 from ..config.loader import ConfigurationLoader
+from ..config.validation import integer
 from ..data import DatasetRepository
 from ..data.schema import validate_dataset_source
 from ..inversion import InversionContext, InversionMethod, get_method
@@ -44,9 +45,13 @@ class WorkflowSession:
 
     def __init__(
         self, pipeline_h_params_file: str | Path | None, *, dataset: str | None = None,
+        nsamples: int | None = None,
     ) -> None:
         validate_dataset_source(dataset)
+        if nsamples is not None:
+            integer(nsamples, "nsamples", minimum=1)
         self._dataset_source = dataset
+        self._nsamples = nsamples
         loader = ConfigurationLoader()
         self._parameter_configs = tuple(
             (path, loader.load(path)) for path in discover_pipeline_h_params(pipeline_h_params_file)
@@ -56,6 +61,7 @@ class WorkflowSession:
             config.validate_hardware()
         self._sweep_output = SweepOutput(
             [path for path, _ in self._parameter_configs], dataset=self._dataset_source,
+            nsamples=self._nsamples,
         )
         self.output_dir = self._sweep_output.output_dir
         self._outputs: dict[str, RunOutput] = {}
@@ -158,6 +164,8 @@ class WorkflowSession:
             preflight.configuration()
             self._load_dataset()
             uids = self.repository.select_uids(self._dataset_source)
+            if self._nsamples is not None:
+                uids = uids[:self._nsamples]
             if not uids:
                 if self._dataset_source is not None:
                     raise ValueError(f"No project records found for dataset source {self._dataset_source!r}.")

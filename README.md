@@ -23,7 +23,7 @@ Allow several gigabytes for the download cache and saved dataset.
 The directories containing configuration and data have fixed positions beside
 `src/`. Package paths resolve from that source layout, independent of the working
 directory. Run the `uv` examples from the project root; the environment's installed
-`diffuse` command uses the same fixed paths when called elsewhere.
+`diffuse` and `experiment` commands use the same fixed paths when called elsewhere.
 
 ## Configuration
 
@@ -51,9 +51,13 @@ Steps must be positive, guidance finite and nonnegative, and fractions within
 P2P `auto` selects replacement for equal whitespace-word counts and refinement
 otherwise. Method-specific P2P extras do not override shared mode or fractions.
 
-Checked-in batch sizes are **2** source images for inversion and **8** image
-pairs for editing. The stages are independent; an editing batch of `N` pairs
-contains `N` source and `N` target branches. Omitted `inversion_batch_size`
+Checked-in batch sizes are **8** source images for inversion and **32** image
+pairs for editing, with **4** threads for dataset/artifact reads. These are
+starting settings for a 32 GB VRAM GPU at 512x512; tune batch sizes using peak
+memory and images per second, including Null-text backward passes.
+The stages are independent; an editing batch of `N` pairs contains `N` source
+and `N` target branches, doubled to `4N` UNet branches for classifier-free
+guidance. Omitted `inversion_batch_size`
 defaults to `1`. Reduce batches for smaller GPUs; CPU offload and attention
 chunking are configurable. Null-text inversion supports `none`/`model` offload;
 its replay also supports sequential offload. An out-of-memory error stops the run.
@@ -64,6 +68,24 @@ fail before model loading; complete method preflight precedes sample inversion.
 See [method requirements and defaults](docs/methods.md).
 
 ## Run experiments
+
+Compare every discovered method on the first 10 records with one parameter file:
+
+```powershell
+uv run experiment --h-params default.yaml --nsamples 10
+uv run experiment --h-params default.yaml --nsamples 10 --dataset magic-brush
+```
+
+`experiment` always selects all registered methods and accepts no `--method`
+argument. Both `--h-params` and `--nsamples` are required; `--h-params ALL` is
+rejected and the sample count must be a positive integer. Source filtering, when
+specified, occurs before taking the first records in dataset order. Every method
+inverts, reconstructs, and edits the same prefix. A count larger than the available
+records processes every available record; an empty selection fails. MagicBrush
+turns count as individual records. Cached records count toward the limit and reuse
+compatible inversions; existing artifacts outside the prefix remain published.
+Limited runs record the requested count in the top-level `nsamples` field of
+`sweep.json`.
 
 Invert, reconstruct, and edit every project record with one parameter file:
 
@@ -109,6 +131,15 @@ Unsupported values raise `ValueError` before an execution session is created.
 
 ```python
 run_dir = run_methods(["ddim"], pipeline_h_params_file="default.yaml", dataset="magic-brush")
+```
+
+Both APIs also accept `nsamples=10` to limit processing to the first 10 records
+after source filtering, or `None` (the default) to process every selected record.
+Booleans, non-integer values, and nonpositive counts raise `ValueError` before an
+execution session is created. The Python equivalent of `experiment` is:
+
+```python
+run_dir = run_methods(["ALL"], pipeline_h_params_file="default.yaml", nsamples=10)
 ```
 
 ## Replay saved inversions

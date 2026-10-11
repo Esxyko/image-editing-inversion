@@ -7,6 +7,7 @@ from typing import Sequence
 
 from ..artifacts import ArtifactReference, ArtifactRepository
 from ..artifacts.layout import method_directory_name
+from ..config.validation import integer
 from ..data.schema import validate_dataset_source
 from ..inversion import discover_methods
 from .session import WorkflowSession
@@ -37,10 +38,17 @@ class WorkflowRunner:
     def __init__(self, *, pipeline_h_params_file: str | Path | None = None) -> None:
         self._pipeline_h_params_file = pipeline_h_params_file
 
-    def run_methods(self, method_ids: Sequence[str], *, dataset: str | None = None) -> Path:
+    def run_methods(
+        self, method_ids: Sequence[str], *, dataset: str | None = None,
+        nsamples: int | None = None,
+    ) -> Path:
         validate_dataset_source(dataset)
+        if nsamples is not None:
+            integer(nsamples, "nsamples", minimum=1)
         resolved = _resolve_method_ids(method_ids)
-        return WorkflowSession(self._pipeline_h_params_file, dataset=dataset).run_methods(resolved)
+        return WorkflowSession(
+            self._pipeline_h_params_file, dataset=dataset, nsamples=nsamples,
+        ).run_methods(resolved)
 
     def edit_artifacts(self, artifact_references: Sequence[ArtifactReference]) -> Path:
         if not artifact_references:
@@ -58,9 +66,9 @@ def edit_artifacts(artifact_id: str | None = None) -> Path:
 
 def run_methods(
     method_ids: Sequence[str], *, pipeline_h_params_file: str | Path | None = None,
-    dataset: str | None = None,
+    dataset: str | None = None, nsamples: int | None = None,
 ) -> Path:
-    """Invert and edit selected source records; ALL expands discovered method IDs."""
+    """Invert and edit an optional source prefix; ALL expands discovered method IDs."""
     return WorkflowRunner(pipeline_h_params_file=pipeline_h_params_file).run_methods(
-        method_ids, dataset=dataset,
+        method_ids, dataset=dataset, nsamples=nsamples,
     )

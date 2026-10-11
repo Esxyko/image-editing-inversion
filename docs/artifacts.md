@@ -351,6 +351,15 @@ The manifest includes a top-level `dataset` field from its initial creation:
 argument is omitted or the workflow replays saved artifacts. The field is
 preserved in successful and failed runs; `schema_version` remains `2`.
 
+Limited inversion runs also include a top-level `nsamples` field from initial
+manifest creation, containing the requested positive count. `experiment` always
+provides this limit; Python callers may pass `nsamples` to `run_methods` or
+`WorkflowRunner.run_methods`. Filtering by source precedes limiting in dataset
+order. If fewer records are available, all matching records are processed.
+Only the selected prefix is inverted and edited; cached records count toward the
+limit and publication preserves artifacts outside it. Unlimited and replay runs
+omit `nsamples`. Sample selection does not change cache identity or artifact schemas.
+
 Run
 records contain UIDs, combined artifact paths, and artifact indices rather than
 prompts, source images, or masks.

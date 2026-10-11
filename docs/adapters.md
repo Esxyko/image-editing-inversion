@@ -134,6 +134,16 @@ required: provide a pipeline parameter filename or the exact value `ALL` to
 sweep every parameter file.
 `edit_artifacts(artifact_id=None)` always sweeps all parameter files.
 
+For a comparison on a dataset prefix, use
+`uv run experiment --h-params default.yaml --nsamples 10`. It automatically
+selects every discovered adapter, accepts no `--method`, and requires one
+parameter file (`ALL` is rejected). The optional `--dataset` filter applies before
+the limit. Python `run_methods` and `WorkflowRunner.run_methods` accept optional
+`nsamples: int | None = None`; positive integers limit processing to the first
+selected records and `None` retains unlimited processing. Invalid counts,
+including booleans, are rejected before session creation. Every adapter receives
+the same selected record prefix through the existing batching workflow.
+
 ## Factory registration and lifetimes
 
 For programmatic registration, pass a method ID and zero-argument factory:
