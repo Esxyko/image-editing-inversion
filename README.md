@@ -17,7 +17,11 @@ uv sync
 The project dataset, `beatle-ju1ce/image-editing-inversion`, is private. Request
 access, then set `HF_TOKEN` in your environment, fill the root `.env` using
 [.env.example](.env.example), or use an existing Hugging Face login. The first
-load downloads the train split into `data/`; later loads use that saved copy.
+load downloads the eval split into `data/`; later loads use that saved copy.
+Both `diffuse` and `experiment` use `eval` by default. Their `--dataset`
+argument filters source datasets within `eval`.
+The dev split contains the MagicBrush records excluded by the edit-turn rules
+in [the dataset reference](docs/dataset.md#eval-and-dev-splits).
 Allow several gigabytes for the download cache and saved dataset.
 
 The directories containing configuration and data have fixed positions beside

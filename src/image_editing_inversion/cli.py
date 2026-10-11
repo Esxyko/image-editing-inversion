@@ -8,7 +8,7 @@ from typing import Callable, Sequence
 
 def build_diffuse_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="diffuse", description="Invert, reconstruct, and edit project dataset records."
+        prog="diffuse", description="Invert, reconstruct, and edit records from the project eval split."
     )
     parser.add_argument(
         "--method", action="append", required=True, metavar="METHOD|ALL",
@@ -23,7 +23,7 @@ def build_diffuse_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dataset",
         choices=("pie-bench", "magic-brush"),
-        help="Only process records from this source dataset; omitted processes every record.",
+        help="Filter the eval split by source dataset; omitted processes every eval record.",
     )
     return parser
 
@@ -47,7 +47,7 @@ def _positive_integer(value: str) -> int:
 def build_experiment_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="experiment",
-        description="Compare every inversion method on the first selected project dataset records.",
+        description="Compare every inversion method on the first selected records from the project eval split.",
     )
     parser.add_argument(
         "--h-params", required=True, type=_single_parameter_file, metavar="FILENAME",
@@ -60,7 +60,7 @@ def build_experiment_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dataset",
         choices=("pie-bench", "magic-brush"),
-        help="Only select records from this source dataset; omitted selects every source.",
+        help="Filter the eval split by source dataset; omitted selects every source in eval.",
     )
     return parser
 

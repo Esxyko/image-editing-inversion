@@ -22,9 +22,52 @@ dataset.
   back to the edit using its content fingerprint. Each UID is
   `<img_id>:<turn_index>`.
 
-The combined artifact contains PIE-Bench records first, followed by the
-retained MagicBrush train and dev records. Assembly requires one matching
+The original combined artifact contains PIE-Bench records first, followed by the
+retained MagicBrush source train and dev records. Assembly requires one matching
 caption pair for every retained MagicBrush edit and rejects duplicate UIDs.
+
+## Eval and dev splits
+
+The assembled Hub dataset's original `train` split is partitioned into `eval`
+and `dev`. Stage numbers refer to the MagicBrush UID's `turn_index` suffix;
+related stages share the same `img_id`. Membership is determined from the
+original assembled dataset, after its image-size filtering.
+
+- `eval` retains all PIE-Bench records and every MagicBrush first turn.
+- A MagicBrush second turn is initially eligible for `eval` only when its image
+  ID has no first turn but does have a third turn in the original assembled dataset.
+- Other second turns and every third turn move to `dev`.
+
+The eligible second turns are then reduced to balance `eval` at **700 replacement
+and 700 refinement pairs**. Replacement means equal source/target prompt word
+counts using `str.split()`; refinement means different word counts. Rank the 554
+eligible replacement and 1,088 eligible refinement second turns separately by:
+
+1. Original instruction word count, `len(instruction.split())`, ascending.
+2. Original instruction character count, `len(instruction)`, ascending, including
+   spaces and punctuation.
+3. Encoded `source_img` file size in bytes, descending.
+4. Original assembled record position, ascending, to break any remaining ties.
+
+Move the first **249 replacement** and **732 refinement** records into `dev`.
+Instructions are matched from preserved caption-generation metadata by image ID
+and source/target captions. Selection includes 242 replacement records below
+(6 words, 28 characters), followed by the 7 largest source files at that length;
+and 729 refinement records below (7 words, 35 characters), followed by the 3
+largest source files at that length. Ranking selects records to move; each split
+retains the original assembled relative order.
+
+The final `eval` contains 1,400 records: all 700 PIE-Bench records, all 39
+MagicBrush first turns, and 661 second turns (305 replacement, 356 refinement).
+The final `dev` contains 3,896 records. The union still contains all 5,296 records.
+The balanced split was published in
+[revision f51282b](https://huggingface.co/datasets/beatle-ju1ce/image-editing-inversion/commit/f51282b798112305f810e121bfc7c0dccb4f4e62).
+
+Every original record belongs to exactly one split. Both preserve the original
+five columns, image bytes, UIDs, and relative record order. The runtime loads
+only `eval`; `dev` remains available on the Hub separately.
+Both `diffuse` and `experiment` use this shared loader. Their `--dataset`
+argument selects PIE-Bench or MagicBrush records within `eval`.
 
 ## Record format
 
@@ -48,7 +91,7 @@ sample = repository.sample(repository.uids[0])
 ```
 
 Both APIs use the fixed `data/` directory beside `src/`, independent of the
-working directory. The first load downloads the private Hub train split;
+working directory. The first load downloads the private Hub eval split;
 subsequent loads use saved Arrow shards. Access requires `HF_TOKEN`, the root
 `.env` file, or an existing Hugging Face login. Incomplete saved datasets fail
 clearly; repair their dataset files while preserving caches, artifacts, and outputs.

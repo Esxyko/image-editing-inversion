@@ -30,7 +30,7 @@ Configuration and storage locations are fixed relative to `src/`.
     |   |-- validation.py           # Shared semantic checks and ConfigError
     |   `-- loader.py               # Strict YAML schemas and invocation snapshot
     |-- data/
-    |   |-- schema.py, loader.py     # Project dataset contract and loading
+    |   |-- schema.py, loader.py     # Project eval split contract and loading
     |   `-- identity.py, repository.py # Content digest and ordered UID access
     |-- artifacts/
     |   |-- inversion.py            # Per-image state and compatibility
@@ -64,7 +64,7 @@ Configuration and storage locations are fixed relative to `src/`.
 | Package | Owns | Dependencies within the project |
 | --- | --- | --- |
 | `config` | Configuration models, schemas, shared YAML snapshot, hardware validation | Internal project paths |
-| `data` | Fixed project dataset, schema, UID index, content identity | Internal project paths |
+| `data` | Fixed project eval dataset, schema, UID index, content identity | Internal project paths |
 | `artifacts` | Tensor contracts, compatibility, collection serialization, catalogs, publication | Internal project paths |
 | `inversion` | Adapter contracts, factories, algorithms, shared component computation | Configuration and artifacts |
 | `generation` | Model runtime, attention control, reconstruction/editing | Configuration, artifacts, denoising contracts |

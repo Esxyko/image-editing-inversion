@@ -11,7 +11,7 @@ from .schema import HUB_DATASET_REF, REQUIRED_COLUMNS
 
 
 def load_project_dataset() -> Dataset:
-    """Return the train dataset, downloading it once into the project data root."""
+    """Return the eval dataset, downloading it once into the project data root."""
     paths = project_paths()
     data_dir = paths.data
     state_path = data_dir / "state.json"
@@ -35,7 +35,7 @@ def load_project_dataset() -> Dataset:
         if (data_dir / "dataset_dict.json").exists():
             raise RuntimeError(
                 f"A different Hugging Face dataset artifact exists at {data_dir}; "
-                "the project requires a single train Dataset there."
+                "the project requires a single eval Dataset there."
             )
 
         load_dotenv(dotenv_path=paths.env, override=False)
@@ -47,7 +47,7 @@ def load_project_dataset() -> Dataset:
             )
 
         try:
-            dataset = load_dataset(HUB_DATASET_REF, split="train", token=token)
+            dataset = load_dataset(HUB_DATASET_REF, split="eval", token=token)
         except Exception as exc:
             raise RuntimeError(
                 f"Could not download {HUB_DATASET_REF}. Check dataset access, HF_TOKEN "
@@ -56,7 +56,7 @@ def load_project_dataset() -> Dataset:
 
         if not isinstance(dataset, Dataset) or set(dataset.column_names) != REQUIRED_COLUMNS:
             raise RuntimeError(
-                f"Downloaded {HUB_DATASET_REF}, but its train split does not have the "
+                f"Downloaded {HUB_DATASET_REF}, but its eval split does not have the "
                 "expected project columns. No dataset was saved."
             )
 
