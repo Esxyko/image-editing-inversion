@@ -102,3 +102,7 @@ class InversionMethod(ABC):
     ) -> DenoisingHook | None:
         """Return a hook when the artifact has method-specific per-step state."""
         return None
+
+    def result_metadata(self, artifact: InversionArtifact) -> Mapping[str, Any]:
+        """Return JSON-compatible method diagnostics from saved inversion state."""
+        return {}

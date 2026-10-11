@@ -94,6 +94,10 @@ uv run diffuse `
 Select only `--method null-text` for a Null-text run. The adapter is also
 exported as `NullTextInversion` from `image_editing_inversion.inversion`.
 
+Null-text artifacts also store `actual_num_inner_steps`, a positive int64 count
+per timestep for each sample. Counts include every completed Adam update,
+including the update on the iteration that triggers early stopping.
+
 Null-text artifacts store the terminal pivot plus `null_text_embeddings` of
 shape `[T, 1, token_count, embedding_dim]` in descending denoising order and the
 optimization `guidance_scale` repeated in a `[T]` tensor. The replay hook supplies

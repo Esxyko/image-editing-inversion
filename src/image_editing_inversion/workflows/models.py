@@ -49,7 +49,10 @@ class WorkItem:
     inversion: InversionRecord | None = None
 
     def result_values(self) -> dict[str, Any]:
-        return reference_values(self.prepared.loaded.reference, self.inversion)
+        return {
+            **self.prepared.method.result_metadata(self.prepared.loaded.artifact),
+            **reference_values(self.prepared.loaded.reference, self.inversion),
+        }
 
 
 def reference_values(

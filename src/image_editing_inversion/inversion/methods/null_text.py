@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 _SETTINGS_FILENAME = "Null_text.yaml"
 _EMBEDDINGS_KEY = "null_text_embeddings"
+_INNER_STEPS_KEY = "actual_num_inner_steps"
 _require_finite = partial(require_finite, label="Null-text")
 
 
@@ -95,7 +96,9 @@ def _artifact_state(artifact: InversionArtifact) -> tuple[torch.Tensor, float]:
         raise ValueError("Null-text replay requires a null-text artifact")
     if artifact.eta != 0:
         raise ValueError("Null-text replay requires artifact eta == 0")
-    if set(artifact.per_step_state) != {_EMBEDDINGS_KEY, _GUIDANCE_KEY}:
+    required = {_EMBEDDINGS_KEY, _GUIDANCE_KEY}
+    keys = set(artifact.per_step_state)
+    if not required <= keys or keys - required - {_INNER_STEPS_KEY}:
         raise ValueError(
             "Null-text artifacts require null_text_embeddings and guidance_scale state"
         )
@@ -114,6 +117,14 @@ def _artifact_state(artifact: InversionArtifact) -> tuple[torch.Tensor, float]:
     _require_finite(artifact.terminal_latent, "terminal latent")
     _require_finite(embeddings, "saved embeddings")
     scale = validate_guidance_state(artifact, "Null-text", null_text=True)
+    inner_steps = artifact.per_step_state.get(_INNER_STEPS_KEY)
+    if inner_steps is not None and (
+        not isinstance(inner_steps, torch.Tensor)
+        or inner_steps.dtype != torch.int64
+        or tuple(inner_steps.shape) != (len(artifact.timesteps),)
+        or not torch.all(inner_steps > 0).item()
+    ):
+        raise ValueError("Null-text actual_num_inner_steps must be a positive int64 [timesteps] tensor")
     return embeddings, scale
 
 
@@ -223,6 +234,14 @@ class NullTextInversion(InversionMethod):
     def create_denoising_hook(self, artifact: InversionArtifact) -> DenoisingHook:
         return _NullTextHook(artifact)
 
+    def result_metadata(self, artifact: InversionArtifact) -> Mapping[str, Any]:
+        inner_steps = artifact.per_step_state.get(_INNER_STEPS_KEY)
+        counts = None if inner_steps is None else inner_steps.detach().cpu().tolist()
+        return {
+            _INNER_STEPS_KEY: counts,
+            "total_inner_steps": None if counts is None else sum(counts),
+        }
+
     @staticmethod
     def _optimize(
         pivots: list[torch.Tensor],
@@ -230,13 +249,14 @@ class NullTextInversion(InversionMethod):
         conditional: torch.Tensor,
         settings: _NullTextSettings,
         context: InversionContext,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         editor = context.editor
         scale = context.config.sampling.guidance_scale
         step_count = len(editor.expected_timesteps)
         latent = editor.to_device(pivots[-1], dtype=editor.dtype)
         batch_size = latent.shape[0]
         saved_embeddings: list[torch.Tensor] = []
+        inner_steps: list[list[int]] = []
         with torch.enable_grad():
             for step_index, timestep in enumerate(editor.scheduler.timesteps):
                 target = editor.to_device(
@@ -255,6 +275,7 @@ class NullTextInversion(InversionMethod):
                     for parameter in parameters
                 ]
                 active = list(range(batch_size))
+                counts = [0] * batch_size
                 tolerance = (
                     settings.early_stop_epsilon + step_index * settings.epsilon_increment
                 )
@@ -297,6 +318,7 @@ class NullTextInversion(InversionMethod):
                             )
                         _require_finite(parameter.grad, "embedding gradients")
                         optimizers[index].step()
+                        counts[index] += 1
                         _require_finite(parameter, "optimized embeddings")
                     loss_values = losses.detach().cpu().tolist()
                     active = [
@@ -307,6 +329,7 @@ class NullTextInversion(InversionMethod):
                     del prediction, guided, reconstructed, losses, active_embeddings
                     if not active:
                         break
+                inner_steps.append(counts)
                 with torch.no_grad():
                     unconditional = torch.cat(parameters).detach()
                     del parameters, optimizers, parameter
@@ -323,7 +346,10 @@ class NullTextInversion(InversionMethod):
                         guided, timestep, latent, eta=0
                     ).prev_sample.detach()
                     _require_finite(latent, "optimized trajectory latent")
-        return torch.stack(saved_embeddings).contiguous()
+        return (
+            torch.stack(saved_embeddings).contiguous(),
+            torch.tensor(inner_steps, dtype=torch.int64, device="cpu"),
+        )
 
     def invert(
         self, sample: Mapping[str, Any], context: InversionContext
@@ -359,7 +385,7 @@ class NullTextInversion(InversionMethod):
             pivots = conditional_pivots(sources, uids, inverse_scheduler, context, "Null-text")
             # Whole-model offload keeps the UNet resident until explicit cleanup.
             # Do not call another pipeline component or offload it during backward.
-            optimized = self._optimize(
+            optimized, inner_steps = self._optimize(
                 pivots, unconditional, conditional, settings, context
             )
             artifacts: list[InversionArtifact] = []
@@ -367,6 +393,7 @@ class NullTextInversion(InversionMethod):
                 artifact = build_artifact(self.method_id, context, uid, pivots[-1][index:index + 1], {
                     _EMBEDDINGS_KEY: optimized[:, index:index + 1],
                     _GUIDANCE_KEY: guidance_state(context),
+                    _INNER_STEPS_KEY: inner_steps[:, index],
                 })
                 self.validate_replay(artifact, context)
                 artifacts.append(artifact)

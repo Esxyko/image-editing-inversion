@@ -191,6 +191,11 @@ invalidate caches; remove affected cache entries when recomputation is needed.
 reads and image writes. Both legacy batch durations repeat on member records;
 use `batches.jsonl` for aggregate timing instead of summing those repeated fields.
 `results.jsonl` additionally records `inversion_batch_id` and `edit_batch_id`.
+Null-text results include `actual_num_inner_steps`, the list of actual Adam update
+counts in the artifact's descending timestep order, and `total_inner_steps`, their
+sum. These counts describe the original inversion and are retained for cache hits
+and replay. Older Null-text artifacts without counts remain reusable and report
+`null` for both fields; newly computed inversions persist counts in per-step state.
 Cache hits retain their lookup batch ID, replay-only inversions use `null`, and
 skipped samples have no edit batch ID (`null`).
 

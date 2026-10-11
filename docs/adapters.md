@@ -52,6 +52,12 @@ implementations live under `image_editing_inversion.inversion.methods`.
 Published inversion implementations can then be adapted without changing the
 common editor.
 
+Adapters can override `result_metadata(artifact)` to expose JSON-compatible
+method diagnostics in sample result records after successful preparation,
+including editing errors. The default returns an empty mapping. Derive diagnostics
+from saved artifact state so cache hits and replay retain the original values.
+Shared result fields take precedence over method diagnostics.
+
 To customize attention behavior, subclass `PromptToPrompt` from
 `image_editing_inversion.generation` and return that class from the adapter's
 `prompt_to_prompt_class` property. The base class exposes `artifacts`,
