@@ -9,7 +9,7 @@ import torch
 
 from ..artifacts import InversionArtifact
 from ..config import PromptToPromptConfig
-from .alignment import PairAttentionMap, _pair_attention_map
+from .alignment import PairAttentionMap, _BatchedPairAttentionMap, _pair_attention_map
 
 
 class PromptToPrompt:
@@ -70,6 +70,30 @@ class PromptToPrompt:
             self.build_pair_map(source, target)
             for source, target in zip(self.source_prompts, self.target_prompts, strict=True)
         )
+        self._batch_maps = self._group_pair_maps() if type(self) is PromptToPrompt else ()
+
+    def _group_pair_maps(self) -> tuple[_BatchedPairAttentionMap, ...]:
+        """Build reusable batched maps once, rather than for each attention layer."""
+        groups = []
+        for mode in ("replace", "refine"):
+            selected = [index for index, mapping in enumerate(self.pair_maps) if mapping.mode == mode]
+            if not selected:
+                continue
+            pairs = [self.pair_maps[index] for index in selected]
+            indices = torch.tensor(selected, device=self.device, dtype=torch.long)
+            if mode == "replace":
+                matrices = [pair.replacement for pair in pairs]
+                assert all(matrix is not None for matrix in matrices)
+                groups.append(_BatchedPairAttentionMap(mode, indices, torch.stack(matrices)))
+            else:
+                mappings = [pair.refinement_indices for pair in pairs]
+                alphas = [pair.refinement_alpha for pair in pairs]
+                assert all(mapping is not None for mapping in mappings)
+                assert all(alpha is not None for alpha in alphas)
+                groups.append(_BatchedPairAttentionMap(
+                    mode, indices, torch.stack(mappings), torch.stack(alphas),
+                ))
+        return tuple(groups)
 
     def build_pair_map(self, source_prompt: str, target_prompt: str) -> PairAttentionMap:
         """Return token alignment for one pair; override for custom mapping."""

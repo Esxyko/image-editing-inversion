@@ -48,6 +48,7 @@ Configuration and storage locations are fixed relative to `src/`.
     |       `-- ddim.py, direct.py, null_text.py, renoise.py
     |-- generation/
     |   |-- runtime.py, identity.py # Pipeline setup and content identity
+    |   |-- denoising.py            # Internal DDIM executor and hook/processor lifecycle
     |   |-- alignment.py, prompt_to_prompt.py # Token mapping and attention policy
     |   `-- processor.py, editor.py, result.py # Diffusers integration and editing
     `-- workflows/
@@ -56,7 +57,7 @@ Configuration and storage locations are fixed relative to `src/`.
         |-- preflight.py            # Model-free and scheduler sweep validation
         |-- inversion.py            # Reuse, missing-image inversion, publication
         |-- replay.py, editing.py   # Artifact preparation and editing coordination
-        `-- models.py, timing.py, output.py # Records, clocks, manifests, images
+        `-- models.py, timing.py, output.py # Records, clocks, manifests, RGB tensor batches
 ```
 
 ## Ownership and boundaries
@@ -97,7 +98,7 @@ but is excluded from serialization and cache matching.
 4. Process parameter files sequentially. For each inversion method, resolve cache
    hits before reading missing samples, stage batches, and publish the complete group.
 5. Read published artifacts in independently sized editing batches; validate, prepare
-   hooks/policies, edit, save images, and record results and timings.
+   hooks/policies, edit, save RGB tensor batches, and record results and timings.
 6. Finalize method/file/sweep statuses. Exceptions preserve their original cause;
    cleanup/reporting failures are attached as notes where an error is already active.
 
@@ -107,6 +108,17 @@ state are not shared across calls. Session collaborators receive explicit inputs
 and never import or retain the runner. `ReplayPreparer` uses the session's adapters
 for both fresh inversions and saved artifacts. Stable cache inputs are resolved
 once per method/configuration context and combined with each UID.
+
+The session owns one reusable read thread pool and closes it and its model runtime
+on success or failure. Runtime schedule lists and ordinary detached empty-caption
+embeddings are cached within that invocation. `Editor` validates and organizes
+inputs/results; its internal denoising executor owns the DDIM loop, hook dispatch,
+and attention processor installation/restoration. Built-in stateful methods use
+optional batch hooks in all-source/all-target order; external pair hooks retain
+their original contract. Model input views decode four columns eagerly and masks
+only when requested, while public `sample()` still returns all five columns.
+Collection readers are scoped to one lookup/edit batch and clone tensors before
+closing their mappings, so Windows group replacement remains possible.
 
 `experiment` requires one pipeline parameter file and a positive `--nsamples`,
 rejects `--h-params ALL`, and invokes the shared workflow with every discovered
@@ -119,7 +131,7 @@ their requested `nsamples` in the schema-v2 sweep manifest; unlimited runs omit 
 ## Fixed storage layout
 
 ```text
-data/                               # Ignored by Git
+data/                               # New generated files ignored; tracked history retained
 |-- state.json, dataset_info.json, data-*.arrow
 |-- cache/inversion/
 |   |-- sources/<digest>.safetensors
@@ -134,12 +146,14 @@ data/                               # Ignored by Git
     `-- <parameter-file>/<method>/
         |-- resolved-config.json
         |-- results.jsonl
-        |-- batches.jsonl           # Schema v1 batch records
-        `-- images/<uid-with-colons-replaced-by-underscores>/
+        |-- batches.jsonl           # Schema v2 batch records
+        `-- tensors/batch-<edit_batch_id>.safetensors # RGB output schema v1
 ```
 
 Group publication assumes one writer and keeps tensor memory bounded by batches.
-Final artifacts and intermediate components have independent caches. Existing
-schemas, cache identities, filenames, UID ordering, and tensor layouts remain
-unchanged. See [storage contracts](docs/artifacts.md) for compatibility, interruption,
+Final artifacts and intermediate components have independent caches. Their schemas,
+cache identities, filenames, UID ordering, and tensor layouts remain unchanged.
+New editing outputs store uncompressed CPU uint8 RGB batches; sample records identify
+their relative file and index. Historical PNG outputs remain untouched. See
+[storage contracts](docs/artifacts.md) for compatibility, interruption,
 and timing rules, and [migration guidance](docs/adapters.md#migration) for API changes.

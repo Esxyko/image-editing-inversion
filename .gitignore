@@ -15,8 +15,8 @@ wheels/
 .env.*
 !.env.example
 
-# Processed datasets
-/data/processed/
+# Generated datasets, caches, artifacts, and outputs (tracked history is retained)
+/data/
 
 # Local dataset-building archive
 archive

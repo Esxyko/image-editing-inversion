@@ -77,6 +77,7 @@ class WorkflowSession:
         self._editing: EditingCoordinator | None = None
         self._coordinator: InversionCoordinator | None = None
         self._components: SharedInversionComponents | None = None
+        self._read_pool: ThreadPoolExecutor | None = None
 
     @property
     def repository(self) -> DatasetRepository:
@@ -109,16 +110,47 @@ class WorkflowSession:
 
     @contextmanager
     def _execution(self, method_ids: Sequence[str]) -> Iterator[None]:
+        error: BaseException | None = None
         try:
             self._sweep_output.set_methods(method_ids)
             yield
         except BaseException as exc:
+            error = exc
             if self._sweep_output.status != "error":
                 try:
                     self._fail(exc)
                 except BaseException as recording:
                     exc.add_note(f"Could not finalize sweep manifest: {recording}")
             raise
+        finally:
+            self._close(error)
+
+    def _close(self, error: BaseException | None) -> None:
+        """Attempt all resource cleanup without replacing an active failure."""
+        pool, editor = self._read_pool, self._editor
+        self._read_pool = None
+        self._editor = None
+        cleanup_error: BaseException | None = None
+        callbacks = []
+        if pool is not None:
+            callbacks.append(lambda: pool.shutdown(wait=True, cancel_futures=True))
+        if editor is not None:
+            callbacks.append(editor.close)
+        for callback in callbacks:
+            try:
+                callback()
+            except BaseException as exc:
+                primary = error if error is not None else cleanup_error
+                if primary is None:
+                    cleanup_error = exc
+                else:
+                    primary.add_note(f"Workflow resource cleanup failed: {exc}")
+        if error is None and cleanup_error is not None:
+            try:
+                self._fail(cleanup_error)
+            except BaseException as recording:
+                cleanup_error.add_note(f"Could not finalize cleanup failure: {recording}")
+            raise cleanup_error
 
     def _fail(self, error: BaseException) -> None:
         filename = None if self._parameter_path is None else self._parameter_path.name
@@ -152,7 +184,7 @@ class WorkflowSession:
             completed += counts["ok"]
             self._sweep_output.update(path.name, "ok" if counts["ok"] else "skipped", counts)
         if not completed:
-            message = f"No compatible artifact/file pairs produced images; see {self.output_dir}"
+            message = f"No compatible artifact/file pairs produced RGB tensors; see {self.output_dir}"
             self._sweep_output.finish("error", message)
             raise ValueError(message)
         self._sweep_output.finish("ok")
@@ -265,14 +297,15 @@ class WorkflowSession:
         )
 
     def _sample(self, uid: str) -> Mapping[str, Any]:
-        return self.repository.sample(uid)
+        return self.repository.model_sample(uid)
 
     def _fetch_many(self, function: Any, values: Sequence[Any]) -> list[Any]:
         """Use the configured number of threads for dataset/artifact reads."""
         if self.config.runtime.num_workers == 0:
             return [function(value) for value in values]
-        with ThreadPoolExecutor(max_workers=self.config.runtime.num_workers) as pool:
-            return list(pool.map(function, values))
+        if self._read_pool is None:
+            self._read_pool = ThreadPoolExecutor(max_workers=self.config.runtime.num_workers)
+        return list(self._read_pool.map(function, values))
 
     @property
     def artifact_settings(self) -> ArtifactSettings:

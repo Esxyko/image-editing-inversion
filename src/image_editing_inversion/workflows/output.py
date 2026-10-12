@@ -1,13 +1,17 @@
-"""Persist sweep manifests and per-parameter/method snapshots, images, and records."""
+"""Persist sweep manifests, snapshots, RGB tensor batches, and result records."""
 
 from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import UTC, datetime
 import json
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Mapping, Sequence
 from uuid import uuid4
+
+import torch
+from safetensors.torch import save_file
 
 from .._project import project_paths
 from ..artifacts.layout import method_directory_name
@@ -15,7 +19,7 @@ from ..config import ExperimentConfig
 from .timing import BatchTiming
 
 if TYPE_CHECKING:
-    from PIL import Image
+    from ..generation import EditResult
 
 
 def _write_json(path: Path, values: Mapping[str, Any]) -> None:
@@ -133,7 +137,7 @@ class SweepOutput:
 
 
 class RunOutput:
-    """Own snapshots, images, and records for one parameter/method combination."""
+    """Own snapshots, tensor batches, and records for one method combination."""
 
     def __init__(
         self,
@@ -153,6 +157,7 @@ class RunOutput:
         self.method_id = method_directory_name(method_id)
         self.counts = {"ok": 0, "skipped": 0, "error": 0}
         self.output_dir = output_dir
+        self._rgb_shape = (3, config.model.height, config.model.width)
         self.output_dir.mkdir(parents=True, exist_ok=False)
         self.results_path = self.output_dir / "results.jsonl"
         self.results_path.touch(exist_ok=False)
@@ -219,24 +224,48 @@ class RunOutput:
         with self.batches_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, sort_keys=True, allow_nan=False) + "\n")
 
-    @staticmethod
-    def _sample_name(uid: str) -> str:
-        """Use the project UID with colons replaced for Windows paths."""
-        return uid.replace(":", "_")
-
-    def save_images(
-        self,
-        method_id: str,
-        uid: str,
-        reconstructed: Image.Image,
-        edited: Image.Image,
-    ) -> tuple[Path, Path]:
-        if method_id != self.method_id:
-            raise ValueError("Image method must match its output directory")
-        image_dir = self.output_dir / "images" / self._sample_name(uid)
-        image_dir.mkdir(parents=True, exist_ok=False)
-        reconstructed_path = image_dir / "reconstructed.png"
-        edited_path = image_dir / "edited.png"
-        reconstructed.save(reconstructed_path, format="PNG")
-        edited.save(edited_path, format="PNG")
-        return reconstructed_path, edited_path
+    def save_tensors(
+        self, batch_id: str, uids: Sequence[str], results: Sequence[EditResult],
+    ) -> Path:
+        """Publish one complete uncompressed RGB batch before recording success."""
+        if not isinstance(batch_id, str) or re.fullmatch(r"[0-9a-f]{32}", batch_id) is None:
+            raise ValueError("Tensor batch IDs must be lowercase UUID hex strings")
+        if (not uids or len(uids) != len(results)
+                or any(not isinstance(uid, str) or not uid.strip() for uid in uids)
+                or len(set(uids)) != len(uids)):
+            raise ValueError("Tensor batches require aligned results and unique nonempty UIDs")
+        tensors = {}
+        for name in ("reconstructed", "edited"):
+            values = [getattr(result, name) for result in results]
+            if any(
+                not isinstance(value, torch.Tensor) or value.device.type != "cpu"
+                or value.dtype != torch.uint8 or tuple(value.shape) != self._rgb_shape
+                or not value.is_contiguous()
+                for value in values
+            ):
+                raise ValueError(f"{name} must contain contiguous CPU uint8 RGB tensors of shape {self._rgb_shape}")
+            tensors[name] = torch.stack(values)
+        directory = self.output_dir / "tensors"
+        directory.mkdir(exist_ok=True)
+        path = directory / f"batch-{batch_id}.safetensors"
+        if path.exists():
+            raise FileExistsError(f"Tensor batch already exists: {path}")
+        temporary = directory / f".batch-{uuid4().hex}.tmp"
+        try:
+            save_file(tensors, str(temporary), metadata={
+                "schema_version": "1", "uids": json.dumps(list(uids)),
+                "color_space": "RGB", "layout": "NCHW", "value_range": "0..255",
+                "method_id": self.method_id,
+                "pipeline_h_params_file": self.pipeline_h_params_file,
+                "edit_batch_id": batch_id,
+            })
+            if path.exists():
+                raise FileExistsError(f"Tensor batch already exists: {path}")
+            temporary.replace(path)
+        except BaseException as exc:
+            try:
+                temporary.unlink(missing_ok=True)
+            except BaseException as cleanup:
+                exc.add_note(f"Tensor batch cleanup failed: {cleanup}")
+            raise
+        return path

@@ -10,9 +10,36 @@ import torch
 
 from ...artifacts import ArtifactCompatibilityError, InversionArtifact
 from ..context import InversionContext
+from ..hooks import BatchedDenoisingHook, DenoisingStepState
 from ..validation import require_finite
 
 GUIDANCE_KEY = "guidance_scale"
+
+
+class _ArtifactBatchHook(BatchedDenoisingHook):
+    """Validate the schedule and source-first latent layout of bundled hooks."""
+
+    def __init__(self, artifacts: Sequence[InversionArtifact], label: str) -> None:
+        super().__init__(tuple(artifact.sample_uid for artifact in artifacts))
+        self._label = label
+        self._timesteps = artifacts[0].timesteps
+        shape = artifacts[0].terminal_latent.shape[1:]
+        if any(
+            artifact.timesteps != self._timesteps or artifact.terminal_latent.shape[1:] != shape
+            for artifact in artifacts
+        ):
+            raise ValueError(f"{label} batch artifacts must share their schedule and latent shape")
+        self._latent_shape = (2 * self.batch_size, *shape)
+
+    def _validate_step(
+        self, step_index: int, timestep: int, state: DenoisingStepState,
+    ) -> None:
+        if type(step_index) is not int or not 0 <= step_index < len(self._timesteps):
+            raise ValueError(f"{self._label} hook received an invalid step index")
+        if type(timestep) is not int or timestep != self._timesteps[step_index]:
+            raise ValueError(f"{self._label} hook timestep does not match its artifacts")
+        if tuple(state.latents.shape) != self._latent_shape:
+            raise ValueError(f"{self._label} hook expected latents of shape {self._latent_shape}")
 
 
 def validate_ddim_scheduler(config: Mapping[str, Any], label: str) -> None:

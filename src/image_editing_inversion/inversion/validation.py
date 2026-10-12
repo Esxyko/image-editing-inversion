@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Sequence
 
 from ..config import ExperimentConfig
 from .context import InversionContext
@@ -46,4 +46,12 @@ def require_finite(tensor: torch.Tensor, name: str, label: str) -> None:
     import torch
 
     if not torch.isfinite(tensor).all().item():
+        raise ValueError(f"{label} inversion produced non-finite {name}")
+
+
+def require_finite_many(tensors: Sequence[torch.Tensor], name: str, label: str) -> None:
+    """Check same-device tensors with one accelerator-to-host synchronization."""
+    import torch
+
+    if tensors and not torch.stack([torch.isfinite(tensor).all() for tensor in tensors]).all().item():
         raise ValueError(f"{label} inversion produced non-finite {name}")

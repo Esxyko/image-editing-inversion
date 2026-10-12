@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
+from contextlib import ExitStack
 import math
 from pathlib import Path
 from threading import Lock
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from ..artifacts import (
     ArtifactCollection, ArtifactCompatibilityError, ArtifactReference,
@@ -32,7 +33,7 @@ class ReplayPreparer:
         with self._lock:
             self._collections.pop(path, None)
 
-    def load(self, reference: ArtifactReference, settings: ArtifactSettings) -> LoadedArtifact:
+    def _collection(self, reference: ArtifactReference) -> ArtifactCollection:
         stat = reference.path.stat()
         identity = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino)
         with self._lock:
@@ -40,9 +41,41 @@ class ReplayPreparer:
             if cached is None or cached[0] != identity:
                 cached = (identity, ArtifactCollection(reference.path))
                 self._collections[reference.path] = cached
-        artifact = cached[1].load(reference, settings=settings)
+        return cached[1]
+
+    def _loaded(self, artifact: InversionArtifact, reference: ArtifactReference) -> LoadedArtifact:
         self.check_identity(artifact)
-        return LoadedArtifact(artifact, reference, self._repository.sample(artifact.sample_uid))
+        return LoadedArtifact(artifact, reference, self._repository.model_sample(artifact.sample_uid))
+
+    def load(self, reference: ArtifactReference, settings: ArtifactSettings) -> LoadedArtifact:
+        return self._loaded(self._collection(reference).load(reference, settings=settings), reference)
+
+    def load_results(
+        self, references: Sequence[ArtifactReference], settings: ArtifactSettings,
+        *, read: Callable[[Callable[..., Any], Sequence[Any]], list[Any]],
+    ) -> list[LoadResult]:
+        """Share readers while workers decode samples; retain errors in reference order."""
+        with ExitStack() as resources:
+            readers = {}
+            errors: dict[Path, Exception] = {}
+            for reference in references:
+                if reference.path in readers or reference.path in errors:
+                    continue
+                try:
+                    readers[reference.path] = resources.enter_context(self._collection(reference).reader())
+                except Exception as exc:
+                    errors[reference.path] = exc
+
+            def load_result(reference: ArtifactReference) -> LoadResult:
+                try:
+                    if reference.path in errors:
+                        raise errors[reference.path]
+                    artifact = readers[reference.path].load(reference, settings=settings)
+                    return LoadResult(reference, loaded=self._loaded(artifact, reference))
+                except Exception as exc:
+                    return LoadResult(reference, error=exc)
+
+            return read(load_result, references)
 
     def load_result(self, reference: ArtifactReference, settings: ArtifactSettings) -> LoadResult:
         try:
@@ -138,8 +171,8 @@ class ReplayPreparer:
         ):
             raise ArtifactCompatibilityError("Artifact group guidance scale does not match this run")
         hook = method.create_denoising_hook(loaded.artifact)
-        if loaded.artifact.requires_denoising_hook and hook is None:
-            raise ValueError(f"Artifact method {method.method_id!r} needs a denoising hook.")
+        # Batch-only adapters may return None here. The editor checks that one
+        # complete hook strategy is supplied after batch preparation.
         if hook is not None and not isinstance(hook, DenoisingHook):
             raise TypeError("create_denoising_hook must return DenoisingHook or None")
         return PreparedEdit(loaded, method, policy_class, settings, hook)

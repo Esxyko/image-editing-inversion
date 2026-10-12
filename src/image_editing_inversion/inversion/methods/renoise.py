@@ -20,8 +20,9 @@ from ..base import InversionMethod
 from ..context import InversionContext
 from ..components import prepare_sources
 from ..validation import validate_sampling
-from ..hooks import DenoisingHook, DenoisingStepState
+from ..hooks import BatchedDenoisingHook, DenoisingHook, DenoisingStepState
 from .common import (
+    _ArtifactBatchHook,
     model_execution,
     GUIDANCE_KEY as _GUIDANCE_KEY, build_artifact, guidance_state,
     require_finite, validate_ddim_scheduler,
@@ -144,6 +145,21 @@ class _ReNoiseHook(DenoisingHook):
         return state
 
 
+class _ReNoiseBatchHook(_ArtifactBatchHook):
+    """Validate the shared replay step without assembling individual image pairs."""
+
+    def __init__(self, artifacts: Sequence[InversionArtifact]) -> None:
+        super().__init__(artifacts, "ReNoise")
+        for artifact in artifacts:
+            _artifact_state(artifact)
+
+    def before_step(
+        self, step_index: int, timestep: int, state: DenoisingStepState,
+    ) -> DenoisingStepState:
+        self._validate_step(step_index, timestep, state)
+        return state
+
+
 class ReNoiseInversion(InversionMethod):
     """Invert source batches by refining and averaging DDIM noise predictions."""
 
@@ -217,6 +233,13 @@ class ReNoiseInversion(InversionMethod):
     def create_denoising_hook(self, artifact: InversionArtifact) -> DenoisingHook:
         return _ReNoiseHook(artifact)
 
+    def create_batch_denoising_hook(
+        self, artifacts: Sequence[InversionArtifact],
+    ) -> BatchedDenoisingHook | None:
+        if type(self) is not ReNoiseInversion:
+            return None
+        return _ReNoiseBatchHook(artifacts)
+
     @staticmethod
     def _coefficients(
         context: InversionContext,
@@ -280,7 +303,8 @@ class ReNoiseInversion(InversionMethod):
         estimate = previous
         average: torch.Tensor | None = None
         count = 0
-        for index in range(refinements + 1):
+        prediction_count = end if settings.average_latent_estimations else refinements + 1
+        for index in range(prediction_count):
             model_latent = estimate.to(dtype=editor.dtype)
             _require_finite(model_latent, "UNet input")
             model_input = torch.cat((model_latent, model_latent), dim=0)

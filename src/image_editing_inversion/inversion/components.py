@@ -35,7 +35,9 @@ def _encode_sources(
     editor.pipeline.maybe_free_model_hooks()
     latent = editor.encode_images(images)
     editor.pipeline.maybe_free_model_hooks()
-    embeddings = editor.encode_prompts([""] * len(prompts) + list(prompts)).detach()
+    embeddings = torch.cat((
+        editor.empty_prompt_embeddings(len(prompts)), editor.encode_prompts(list(prompts)),
+    )).detach()
     require_finite(embeddings, "caption embeddings", label)
     editor.pipeline.maybe_free_model_hooks()
     return SourceBatch(latent, embeddings)
@@ -141,12 +143,15 @@ class SharedInversionComponents:
             fresh = _encode_sources([prompts[index] for index in missing],
                                     [images[index] for index in missing], context, label)
             unconditional, conditional = fresh.embeddings.chunk(2)
+            latent_cpu = fresh.latent.cpu()
+            unconditional_cpu = unconditional.cpu()
+            conditional_cpu = conditional.cpu()
             producer = [uids[index] for index in missing]
             for position, index in enumerate(missing):
                 entry = {
-                    "latent": fresh.latent[position:position + 1].cpu().clone().contiguous(),
-                    "unconditional": unconditional[position:position + 1].cpu().clone().contiguous(),
-                    "conditional": conditional[position:position + 1].cpu().clone().contiguous(),
+                    "latent": latent_cpu[position:position + 1].clone().contiguous(),
+                    "unconditional": unconditional_cpu[position:position + 1].clone().contiguous(),
+                    "conditional": conditional_cpu[position:position + 1].clone().contiguous(),
                 }
                 self._store("sources", inputs[index], entry, specs, producer)
                 entries[index] = entry

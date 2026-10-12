@@ -95,37 +95,36 @@ class InversionCoordinator:
         if context.components is not None:
             context.components.reset_diagnostics()
             timing.extra.update(context.components.diagnostics)
-        for index, uid in enumerate(uids):
-            started = time.perf_counter()
-            try:
-                with timing.measure("cache_lookup"):
-                    cache_inputs = self.cache_inputs(method, uid, context)
-                    cached = None if cache_inputs is None else self._catalog.lookup(
-                        cache_inputs, settings=settings
-                    )
-                    if cached is not None:
-                        artifact, reference = cached
-                        try:
-                            self.validate(artifact, method, uid, context, cache_inputs=cache_inputs)
-                        except (ValueError, TypeError, KeyError):
-                            cached = None
-                    inputs.append(cache_inputs)
-                    if cached is None:
-                        missing.append(index)
-                        resolved.append(None)
-                    else:
-                        resolved.append(reference)
-                    timing.extra.update(cache_hits=len(resolved) - len(missing), uncached_count=len(missing))
-            except Exception as exc:
-                output.record_error({
-                    "uid": uid, "artifact": None, "artifact_index": None,
-                    "artifact_reused": False,
-                    "inversion_batch_id": timing.batch_id,
-                    "inversion_seconds": time.perf_counter() - started,
-                    "inversion_batch_seconds": None, "inversion_batch_size": 0,
-                    "status": "error", "error": str(exc),
-                }, exc)
-                raise
+        with self._catalog.lookup_batch(settings=settings) as lookup:
+            for index, uid in enumerate(uids):
+                started = time.perf_counter()
+                try:
+                    with timing.measure("cache_lookup"):
+                        cache_inputs = self.cache_inputs(method, uid, context)
+                        cached = None if cache_inputs is None else lookup.lookup(cache_inputs)
+                        if cached is not None:
+                            artifact, reference = cached
+                            try:
+                                self.validate(artifact, method, uid, context, cache_inputs=cache_inputs)
+                            except (ValueError, TypeError, KeyError):
+                                cached = None
+                        inputs.append(cache_inputs)
+                        if cached is None:
+                            missing.append(index)
+                            resolved.append(None)
+                        else:
+                            resolved.append(reference)
+                        timing.extra.update(cache_hits=len(resolved) - len(missing), uncached_count=len(missing))
+                except Exception as exc:
+                    output.record_error({
+                        "uid": uid, "artifact": None, "artifact_index": None,
+                        "artifact_reused": False,
+                        "inversion_batch_id": timing.batch_id,
+                        "inversion_seconds": time.perf_counter() - started,
+                        "inversion_batch_seconds": None, "inversion_batch_size": 0,
+                        "status": "error", "error": str(exc),
+                    }, exc)
+                    raise
 
         if missing:
             missing_uids = [uids[index] for index in missing]

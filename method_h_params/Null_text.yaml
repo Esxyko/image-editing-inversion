@@ -1,4 +1,4 @@
-# Loaded relative to the working directory on the adapter's first inversion.
+# Loaded from the fixed project root on the adapter's first inversion preflight or call.
 # These settings are independent of the shared experiment YAML.
 num_inner_steps: 10
 learning_rate: 0.01

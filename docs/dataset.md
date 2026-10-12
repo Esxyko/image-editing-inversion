@@ -90,6 +90,12 @@ print(repository.uids[0])
 sample = repository.sample(repository.uids[0])
 ```
 
+Public `sample()` continues to decode and return the complete five-column record.
+Workflow `model_sample()` reads UID, source image and both prompts eagerly from a
+four-column view, avoiding unused mask decoding. Its mapping retains all five
+keys and decodes `mask_img` lazily if an external adapter requests it. Selection,
+UID order, fingerprint and content identity still use the original full dataset.
+
 Both APIs use the fixed `data/` directory beside `src/`, independent of the
 working directory. The first load downloads the private Hub eval split;
 subsequent loads use saved Arrow shards. Access requires `HF_TOKEN`, the root

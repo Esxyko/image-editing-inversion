@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from contextlib import ExitStack, contextmanager
 import json
 import os
 from pathlib import Path
 import re
 import struct
-from typing import Any, Sequence
+from threading import Lock
+from typing import Any, Iterator, Sequence
 
 from safetensors import safe_open
 from safetensors.torch import save_file
@@ -138,6 +140,26 @@ def _inspect(path: Path, steps: int) -> tuple[tuple[str, ...], tuple[tuple[str, 
         raise ValueError(f"Cannot read inversion artifact collection at {path}: {exc}") from exc
 
 
+class _ArtifactCollectionReader:
+    """A batch-scoped reader whose tensors are detached from the file mapping."""
+
+    def __init__(self, collection: ArtifactCollection, saved: Any) -> None:
+        self._collection = collection
+        self._saved = saved
+        self._lock = Lock()
+
+    def load(self, reference: ArtifactReference, *, settings: ArtifactSettings) -> InversionArtifact:
+        # Do not require the native reader to support concurrent get_tensor calls.
+        with self._lock:
+            if self._saved is None:
+                raise RuntimeError("The artifact batch reader is closed")
+            return self._collection._load(reference, self._saved, settings=settings)
+
+    def close(self) -> None:
+        with self._lock:
+            self._saved = None
+
+
 class ArtifactCollection:
     """A group file whose ordered IDs correspond to numbered tensor entries."""
 
@@ -176,6 +198,45 @@ class ArtifactCollection:
             raise ValueError(f"Artifact ID not found: {sample_uid}") from exc
 
     def load(self, reference: ArtifactReference, *, settings: ArtifactSettings) -> InversionArtifact:
+        with self.reader() as reader:
+            return reader.load(reference, settings=settings)
+
+    @contextmanager
+    def reader(self) -> Iterator[_ArtifactCollectionReader]:
+        """Parse the native header once for a batch; close mappings before publication."""
+        if self._file_identity() != self._identity:
+            raise ValueError("Artifact collection changed; reopen it before loading")
+        resources = ExitStack()
+        reader: _ArtifactCollectionReader | None = None
+        error: BaseException | None = None
+        try:
+            try:
+                saved = resources.enter_context(safe_open(str(self.path), framework="pt", device="cpu"))
+            except Exception as exc:
+                raise ValueError(f"Cannot read inversion artifact collection at {self.path}: {exc}") from exc
+            reader = _ArtifactCollectionReader(self, saved)
+            yield reader
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            cleanup_error: BaseException | None = None
+            callbacks = (resources.close,) if reader is None else (reader.close, resources.close)
+            for callback in callbacks:
+                try:
+                    callback()
+                except BaseException as exc:
+                    primary = error if error is not None else cleanup_error
+                    if primary is None:
+                        cleanup_error = exc
+                    else:
+                        primary.add_note(f"Artifact reader cleanup failed: {exc}")
+            if error is None and cleanup_error is not None:
+                raise cleanup_error
+
+    def _load(
+        self, reference: ArtifactReference, saved: Any, *, settings: ArtifactSettings,
+    ) -> InversionArtifact:
         if self._file_identity() != self._identity:
             raise ValueError("Artifact collection changed; reopen it before loading")
         if (reference.path != self.path or reference.index >= len(self.ids)
@@ -183,10 +244,9 @@ class ArtifactCollection:
             raise ValueError("Artifact reference does not match the collection's ordered IDs")
         prefix = f"artifacts/{reference.index}/"
         try:
-            with safe_open(str(self.path), framework="pt", device="cpu") as saved:
-                # Detach loaded batches from file mappings before Windows replacement.
-                tensors = {key[len(prefix):]: saved.get_tensor(key).clone()
-                           for key in self._keys[reference.index]}
+            # Detach loaded batches from file mappings before Windows replacement.
+            tensors = {key[len(prefix):]: saved.get_tensor(key).clone()
+                       for key in self._keys[reference.index]}
             metadata = dict(self._entries[reference.index])
             provenance = metadata.pop("provenance")
             artifact = InversionArtifact(

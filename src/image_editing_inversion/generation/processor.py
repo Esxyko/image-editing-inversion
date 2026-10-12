@@ -41,7 +41,7 @@ class _PromptToPromptProcessor:
         scale: float,
         mask: torch.Tensor | None,
     ) -> torch.Tensor:
-        scores = torch.bmm(query.float(), key.float().transpose(1, 2)) * scale
+        scores = torch.matmul(query.float(), key.float().transpose(-1, -2)) * scale
         if mask is not None:
             if mask.dtype == torch.bool:
                 scores = scores.masked_fill(~mask, -torch.inf)
@@ -144,6 +144,111 @@ class _PromptToPromptProcessor:
         )
 
         query_length = query.shape[-2]
+        if type(self.controller) is PromptToPrompt:
+            if self.is_cross:
+                self._default_cross_attention(query, key, value, prepared_mask, attn.scale, output)
+            else:
+                self._default_self_attention(query, key, value, prepared_mask, attn.scale, output)
+        else:
+            self._custom_attention(query, key, value, prepared_mask, attn.scale, output)
+
+        hidden_states = output.transpose(1, 2).reshape(batch_size, query_length, -1)
+        hidden_states = attn.to_out[0](hidden_states)
+        hidden_states = attn.to_out[1](hidden_states)
+        if input_ndim == 4:
+            hidden_states = hidden_states.transpose(1, 2).reshape(
+                batch_size, channels, height, width
+            )
+        if attn.residual_connection:
+            hidden_states = hidden_states + residual
+        return hidden_states / attn.rescale_output_factor
+
+
+    def _default_self_attention(
+        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
+        mask: torch.Tensor | None, scale: float, output: torch.Tensor,
+    ) -> None:
+        pairs = self.controller.batch_size
+        source = slice(2 * pairs, 3 * pairs)
+        source_mask = None if mask is None else mask[source]
+        for branch in (source, slice(3 * pairs, 4 * pairs)):
+            output[branch] = F.scaled_dot_product_attention(
+                query[source], key[source], value[branch], attn_mask=source_mask,
+                dropout_p=0.0, is_causal=False, scale=scale,
+            )
+
+    @staticmethod
+    def _batch_mask(
+        mask: torch.Tensor | None, branches: torch.Tensor,
+    ) -> torch.Tensor | None:
+        return None if mask is None else mask.index_select(0, branches)
+
+    @staticmethod
+    def _query_mask(
+        mask: torch.Tensor | None, start: int, end: int,
+    ) -> torch.Tensor | None:
+        if mask is None or mask.shape[-2] == 1:
+            return mask
+        return mask[..., start:end, :]
+
+    def _default_cross_attention(
+        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
+        mask: torch.Tensor | None, scale: float, output: torch.Tensor,
+    ) -> None:
+        pairs = self.controller.batch_size
+        # Bound score tensors by the old per-pair query budget. Limit projection
+        # copies to four pairs even when the configured editing batch is large.
+        pair_limit = min(4, self.query_chunk_size)
+        for group in self.controller._batch_maps:
+            for offset in range(0, group.pair_indices.numel(), pair_limit):
+                indices = group.pair_indices[offset:offset + pair_limit]
+                source_branches = indices + 2 * pairs
+                target_branches = indices + 3 * pairs
+                source_query = query.index_select(0, source_branches)
+                source_key = key.index_select(0, source_branches)
+                source_value = value.index_select(0, source_branches)
+                target_value = value.index_select(0, target_branches)
+                source_mask = self._batch_mask(mask, source_branches)
+                mapping = group.mapping[offset:offset + pair_limit]
+                if group.mode == "refine":
+                    target_query = query.index_select(0, target_branches)
+                    target_key = key.index_select(0, target_branches)
+                    target_mask = self._batch_mask(mask, target_branches)
+                    assert group.alpha is not None
+                    alpha = group.alpha[offset:offset + pair_limit, None, None, :]
+                chunk_size = max(1, self.query_chunk_size // indices.numel())
+                for start in range(0, query.shape[-2], chunk_size):
+                    end = min(start + chunk_size, query.shape[-2])
+                    source_prob = self._probabilities(
+                        source_query[..., start:end, :], source_key, scale,
+                        self._query_mask(source_mask, start, end),
+                    )
+                    output[source_branches, :, start:end] = torch.matmul(
+                        source_prob.to(source_value.dtype), source_value,
+                    )
+                    if group.mode == "replace":
+                        replacement = torch.matmul(source_prob, mapping[:, None])
+                    else:
+                        target_prob = self._probabilities(
+                            target_query[..., start:end, :], target_key, scale,
+                            self._query_mask(target_mask, start, end),
+                        )
+                        gather_indices = mapping[:, None, None, :].expand(
+                            source_prob.shape[0], source_prob.shape[1], end - start, -1,
+                        )
+                        aligned = source_prob.gather(-1, gather_indices)
+                        replacement = alpha * aligned + (1.0 - alpha) * target_prob
+                    output[target_branches, :, start:end] = torch.matmul(
+                        replacement.to(target_value.dtype), target_value,
+                    )
+
+    def _custom_attention(
+        self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor,
+        prepared_mask: torch.Tensor | None, scale: float, output: torch.Tensor,
+    ) -> None:
+        """Keep the original per-pair extension behavior for every policy subclass."""
+        pairs = self.controller.batch_size
+        query_length = query.shape[-2]
         for pair_index in range(pairs):
             source_branch = 2 * pairs + pair_index
             target_branch = 3 * pairs + pair_index
@@ -154,7 +259,7 @@ class _PromptToPromptProcessor:
             for start in range(0, query_length, self.query_chunk_size):
                 end = min(start + self.query_chunk_size, query_length)
                 source_prob = self._probabilities(
-                    query[source_branch, :, start:end], source_key, attn.scale,
+                    query[source_branch, :, start:end], source_key, scale,
                     self._mask_slice(prepared_mask, source_branch, start, end),
                 )
                 output[source_branch, :, start:end] = torch.bmm(
@@ -165,7 +270,7 @@ class _PromptToPromptProcessor:
                     is not PromptToPrompt.replace_self_attention
                 ):
                     target_prob = self._probabilities(
-                        query[target_branch, :, start:end], target_key, attn.scale,
+                        query[target_branch, :, start:end], target_key, scale,
                         self._mask_slice(prepared_mask, target_branch, start, end),
                     )
                 else:
@@ -190,14 +295,3 @@ class _PromptToPromptProcessor:
                 output[target_branch, :, start:end] = torch.bmm(
                     replacement_prob.to(target_value.dtype), target_value
                 )
-
-        hidden_states = output.transpose(1, 2).reshape(batch_size, query_length, -1)
-        hidden_states = attn.to_out[0](hidden_states)
-        hidden_states = attn.to_out[1](hidden_states)
-        if input_ndim == 4:
-            hidden_states = hidden_states.transpose(1, 2).reshape(
-                batch_size, channels, height, width
-            )
-        if attn.residual_connection:
-            hidden_states = hidden_states + residual
-        return hidden_states / attn.rescale_output_factor

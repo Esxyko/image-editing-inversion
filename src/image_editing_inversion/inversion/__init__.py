@@ -2,11 +2,12 @@
 
 from .base import InversionMethod
 from .context import InversionContext
-from .hooks import DenoisingHook, DenoisingStepState
+from .hooks import BatchedDenoisingHook, DenoisingHook, DenoisingStepState
 from .methods import DDIMInversion, DirectInversion, NullTextInversion, ReNoiseInversion
 from .registry import discover_methods, get_method, register_method, registered_methods
 
 __all__ = [
+    "BatchedDenoisingHook",
     "DDIMInversion",
     "DenoisingHook",
     "DenoisingStepState",

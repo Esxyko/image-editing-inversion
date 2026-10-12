@@ -1,13 +1,13 @@
-"""Reconstructed and edited images for one sample."""
+"""Reconstructed and edited RGB pixel tensors for one sample."""
 
 from dataclasses import dataclass
 
-from PIL import Image
+import torch
 
 
 @dataclass(frozen=True, slots=True)
 class EditResult:
-    """The reconstruction and edit for one dataset sample."""
+    """CPU uint8 RGB tensors in contiguous [3, height, width] layout."""
 
-    reconstructed: Image.Image
-    edited: Image.Image
+    reconstructed: torch.Tensor
+    edited: torch.Tensor

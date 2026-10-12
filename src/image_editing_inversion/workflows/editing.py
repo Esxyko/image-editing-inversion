@@ -1,4 +1,4 @@
-"""Coordinate reference preparation, GPU editing, images, and result records."""
+"""Coordinate reference preparation, GPU editing, RGB tensors, and records."""
 
 from __future__ import annotations
 
@@ -28,9 +28,7 @@ class EditingCoordinator:
         with output.batch("edit", len(references)) as timing:
             timing.extra["edited_count"] = 0
             with timing.measure("input_read"):
-                results = read(
-                    lambda reference: self._replay.load_result(reference, settings), references
-                )
+                results = self._replay.load_results(references, settings, read=read)
             items: list[WorkItem] = []
             with timing.measure("preparation"):
                 for result in results:
@@ -71,6 +69,7 @@ class EditingCoordinator:
             return
         policy = items[0].prepared
         batch_seconds = timing.durations.get("preparation", 0.0)
+        recorded = 0
         try:
             if any(
                 item.prepared.policy_class is not policy.policy_class
@@ -80,10 +79,13 @@ class EditingCoordinator:
             ):
                 raise ValueError("A GPU edit batch cannot mix methods, P2P subclasses or settings")
             with timing.measure("editor", device=context.editor.device):
+                artifacts = [item.prepared.loaded.artifact for item in items]
+                batch_hook = policy.method.create_batch_denoising_hook(artifacts)
                 edited = context.editor.edit_batch(
                     [item.prepared.loaded.sample for item in items],
-                    [item.prepared.loaded.artifact for item in items],
-                    hooks=[item.prepared.hook for item in items],
+                    artifacts,
+                    hooks=[item.prepared.hook for item in items] if batch_hook is None else None,
+                    batch_hook=batch_hook,
                     prompt_to_prompt_class=policy.policy_class,
                     method_settings=policy.settings,
                 )
@@ -91,26 +93,25 @@ class EditingCoordinator:
             if len(edited) != len(items):
                 raise RuntimeError("The editor returned a different number of results.")
             records: list[dict[str, Any]] = []
-            with timing.measure("image_write"):
-                for item, result in zip(items, edited, strict=True):
-                    artifact = item.prepared.loaded.artifact
-                    reconstructed_path, edited_path = output.save_images(
-                        artifact.method_id, artifact.sample_uid,
-                        result.reconstructed, result.edited,
-                    )
+            with timing.measure("tensor_write"):
+                tensor_path = output.save_tensors(
+                    timing.batch_id, [artifact.sample_uid for artifact in artifacts], edited,
+                )
+                for index, item in enumerate(items):
                     records.append({
                         **item.result_values(),
-                        "reconstructed_image": str(reconstructed_path.relative_to(output.output_dir)),
-                        "edited_image": str(edited_path.relative_to(output.output_dir)),
+                        "tensor_file": tensor_path.relative_to(output.output_dir).as_posix(),
+                        "tensor_index": index,
                         "edit_batch_id": timing.batch_id,
                         "edit_batch_seconds": batch_seconds,
                         "status": "ok",
                     })
             for record in records:
                 output.record(record)
+                recorded += 1
         except Exception as exc:
             batch_seconds = timing.durations.get("preparation", 0.0) + timing.durations.get("editor", 0.0)
-            for item in items:
+            for item in items[recorded:]:
                 output.record_error({
                     **item.result_values(),
                     "edit_batch_id": timing.batch_id,

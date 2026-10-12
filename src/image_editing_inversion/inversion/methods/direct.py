@@ -18,8 +18,9 @@ from ..base import InversionMethod
 from ..context import InversionContext
 from ..components import prepare_sources, conditional_pivots
 from ..validation import inverse_scheduler as _inverse_scheduler, validate_sampling
-from ..hooks import DenoisingHook, DenoisingStepState
+from ..hooks import BatchedDenoisingHook, DenoisingHook, DenoisingStepState
 from .common import (
+    _ArtifactBatchHook,
     model_execution,
     GUIDANCE_KEY as _GUIDANCE_KEY, build_artifact, guidance_state,
     require_finite, validate_ddim_scheduler,
@@ -95,6 +96,24 @@ class _DirectInversionHook(DenoisingHook):
         return replace(state, latents=torch.cat((source, latents[1:]), dim=0))
 
 
+class _DirectInversionBatchHook(_ArtifactBatchHook):
+    """Apply the complete batch's source corrections without copying text fields."""
+
+    def __init__(self, artifacts: Sequence[InversionArtifact]) -> None:
+        super().__init__(artifacts, "Direct inversion")
+        self._offsets = torch.cat([_artifact_state(artifact)[0] for artifact in artifacts], dim=1)
+
+    def after_step(
+        self, step_index: int, timestep: int, state: DenoisingStepState,
+    ) -> DenoisingStepState:
+        self._validate_step(step_index, timestep, state)
+        offset = self._offsets[step_index].to(device=state.latents.device, dtype=state.latents.dtype)
+        _require_finite(offset, "replay offset")
+        source = state.latents[:self.batch_size] + offset
+        _require_finite(source, "corrected source latent")
+        return replace(state, latents=torch.cat((source, state.latents[self.batch_size:])))
+
+
 class DirectInversion(InversionMethod):
     """Invert source batches and record each image's reconstruction residuals."""
 
@@ -141,6 +160,13 @@ class DirectInversion(InversionMethod):
 
     def create_denoising_hook(self, artifact: InversionArtifact) -> DenoisingHook:
         return _DirectInversionHook(artifact)
+
+    def create_batch_denoising_hook(
+        self, artifacts: Sequence[InversionArtifact],
+    ) -> BatchedDenoisingHook | None:
+        if type(self) is not DirectInversion:
+            return None
+        return _DirectInversionBatchHook(artifacts)
 
     @staticmethod
     def _calculate_offsets(

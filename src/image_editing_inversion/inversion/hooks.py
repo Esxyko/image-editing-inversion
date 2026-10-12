@@ -9,7 +9,10 @@ import torch
 
 @dataclass(frozen=True, slots=True)
 class DenoisingStepState:
-    """One source/target pair in source-first order during a denoising step.
+    """Source/target tensors in source-first order during a denoising step.
+
+    Pair hooks receive two branches. Batched hooks receive all N source
+    branches followed by all N target branches.
 
     ``variance_noise`` is present in a before-step call when DDIM eta is
     positive. A before-step hook may replace it to control that stochastic
@@ -34,3 +37,22 @@ class DenoisingHook:
         self, step_index: int, timestep: int, state: DenoisingStepState
     ) -> DenoisingStepState:
         return state
+
+
+class BatchedDenoisingHook(DenoisingHook):
+    """Apply one method's hook to a complete source-first editing batch.
+
+    ``sample_uids`` identifies the exact artifact order handled by this hook.
+    The editor validates that order before any model calls. Implementations
+    can return unchanged fields directly instead of copying each image pair.
+    """
+
+    def __init__(self, sample_uids: tuple[str, ...]) -> None:
+        if (not sample_uids or any(not isinstance(uid, str) or not uid.strip() for uid in sample_uids)
+                or len(set(sample_uids)) != len(sample_uids)):
+            raise ValueError("A batched denoising hook requires unique sample UIDs")
+        self.sample_uids = tuple(sample_uids)
+
+    @property
+    def batch_size(self) -> int:
+        return len(self.sample_uids)

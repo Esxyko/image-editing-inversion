@@ -55,7 +55,7 @@ The default returns `None`, so artifacts are saved centrally without automatic
 reuse. All four bundled adapters opt in; Null-text and ReNoise expose the same
 resolved settings used by inversion. Explicit replay does not call this method.
 Hooks receive source/target latents and text embeddings before and after each
-denoising step. Install the method through the
+denoising step. Optional batch hooks are described below. Install the method through the
 `image_editing_inversion.methods` Python entry-point group. Contracts are exported from `image_editing_inversion.inversion`; bundled
 implementations live under `image_editing_inversion.inversion.methods`.
 Published inversion implementations can then be adapted without changing the
@@ -67,6 +67,28 @@ including editing errors. The default returns an empty mapping. Derive diagnosti
 from saved artifact state so cache hits and replay retain the original values.
 Shared result fields take precedence over method diagnostics.
 
+## Batched denoising hooks
+
+Override `InversionMethod.create_batch_denoising_hook(artifacts)` to return a
+`BatchedDenoisingHook` from the inversion package. Its default returns `None`,
+which retains the existing per-artifact `create_denoising_hook` behavior. The
+workflow constructs a batch hook only after selecting compatible artifacts;
+its input includes exactly the images that will be edited, in their result order.
+
+Initialize a batch hook with `super().__init__(tuple(a.sample_uid for a in artifacts))`.
+Its `sample_uids` must match the editor's artifact order. Before/after callbacks
+still take and return `DenoisingStepState`, but every field contains all N source
+branches followed by all N target branches. Shapes, devices and dtypes must
+remain unchanged; the original variance-noise rules still apply. Return unchanged
+tensor fields directly when possible. A batch-only adapter may leave its pair
+hook factory returning `None`; the editor requires a hook strategy for artifacts
+with per-step state.
+
+Direct editor calls pass either `hooks=[...]` or `batch_hook=...`, never both.
+The built-in Null-text, Direct, and ReNoise adapters use batch hooks in workflows.
+Their subclasses retain pair hooks unless they explicitly implement the new
+factory, so existing subclass-specific pair callbacks are preserved.
+
 To customize attention behavior, subclass `PromptToPrompt` from
 `image_editing_inversion.generation` and return that class from the adapter's
 `prompt_to_prompt_class` property. The base class exposes `artifacts`,
@@ -77,7 +99,12 @@ alignment, `active` for the replacement schedule, or
 Each replacement method receives source and target attention probabilities,
 the pair index, and the UNet layer name; it must return a tensor with the target
 probabilities' shape, device, and dtype. Model loading, four-branch UNet layout,
-DDIM denoising, and denoising hooks remain shared.
+DDIM denoising, and denoising hooks remain shared. Only the exact base policy
+uses batched replacement/refinement and shared-source SDPA self-attention;
+every subclass retains the original pair callbacks. The default cross-attention
+path limits pair-count times query-chunk-length to `attention_query_chunk_size`,
+using at most four pairs together. Execution changes may introduce small
+floating-point differences without changing attention policy or cache identity.
 
 For example, a subclass can blend mapped source attention with the target's
 original attention:
@@ -189,11 +216,18 @@ Replay does not load inversion-only hyperparameters.
 | Repository/cache root arguments | No arguments: fixed paths beside `src/` |
 | Reading mutable runner fields such as `editor`, `dataset`, or `output_dir` | Use the returned run-directory `Path` and persisted snapshots/results |
 | Shared inversion helpers under `inversion.methods.common` | Source/pivot reuse under `inversion.components`; algorithm helpers stay in `methods.common` |
+| `EditResult.reconstructed` / `.edited` as PIL images | Contiguous CPU `torch.uint8` RGB tensors shaped `[3, height, width]` |
+| `reconstructed_image` / `edited_image` in new result records | Relative `tensor_file` plus zero-based `tensor_index` into both RGB tensors |
+| Batch timing schema v1 with `image_write` | Schema v2 with `tensor_write`; other duration meanings are retained |
 
 `WorkflowRunner` can be reused: each call creates a new session, reloads the
 configuration snapshot, and constructs fresh adapters and a model runtime.
-The public inversion and hook signatures, entry-point group, tensor layouts,
-cache identities, and saved storage schemas remain unchanged.
+Existing inversion and pair-hook signatures, the entry-point group, inversion
+tensor layouts, cache identities, and inversion storage schemas remain unchanged.
+The optional batch-hook API is additive. Editing result types and output timing
+records migrate as shown above; historical PNG files and records remain intact.
+Standalone editors can call `editor.close()` to release their runtime; workflow
+sessions close their runtime and reusable reader thread pool automatically.
 
 `config.project` provides read-only, source-relative project locations for
 adapters needing fixed parameter files. It is excluded from `config.to_dict()`

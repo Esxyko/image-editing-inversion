@@ -9,7 +9,7 @@ from PIL import Image
 
 from ..artifacts import InversionArtifact
 from .context import InversionContext
-from .hooks import DenoisingHook
+from .hooks import BatchedDenoisingHook, DenoisingHook
 
 if TYPE_CHECKING:
     from ..config import ExperimentConfig
@@ -115,3 +115,9 @@ class InversionMethod(ABC):
     def result_metadata(self, artifact: InversionArtifact) -> Mapping[str, Any]:
         """Return JSON-compatible method diagnostics from saved inversion state."""
         return {}
+
+    def create_batch_denoising_hook(
+        self, artifacts: Sequence[InversionArtifact],
+    ) -> BatchedDenoisingHook | None:
+        """Optionally handle all artifacts together; None retains pair hooks."""
+        return None

@@ -2,7 +2,7 @@
 
 Compare DDIM, Null-text, Direct Inversion, and ReNoise with one Stable Diffusion
 1.5 runtime and Prompt-to-Prompt editor. Each dataset record produces a source
-reconstruction and a target-caption edit. Inversions are saved and reused across
+reconstruction and a target-caption edit as RGB pixel tensors. Inversions are saved and reused across
 compatible experiments; dataset masks are reserved for later metrics.
 
 ## Setup
@@ -55,7 +55,7 @@ Steps must be positive, guidance finite and nonnegative, and fractions within
 P2P `auto` selects replacement for equal whitespace-word counts and refinement
 otherwise. Method-specific P2P extras do not override shared mode or fractions.
 
-Checked-in batch sizes are **8** source images for inversion and **32** image
+Checked-in batch sizes are **8** source images for inversion and **32** RGB tensor
 pairs for editing, with **4** threads for dataset/artifact reads. These are
 starting settings for a 32 GB VRAM GPU at 512x512; tune batch sizes using peak
 memory and images per second, including Null-text backward passes.
@@ -177,14 +177,18 @@ data/
         |-- resolved-config.json
         |-- results.jsonl
         |-- batches.jsonl
-        `-- images/<uid-with-colons-replaced-by-underscores>/
-            |-- reconstructed.png
-            `-- edited.png
+        `-- tensors/
+            `-- batch-<edit_batch_id>.safetensors
 ```
 
-`data/` is ignored by Git. Each invocation returns its parent run directory.
-Results retain raw UIDs and artifact positions; image paths are relative to their
-method output. Existing image directories cause an error instead of being overwritten.
+New files under `data/` are ignored by Git; previously tracked history remains.
+Each invocation returns its parent run directory. Results retain raw UIDs and
+artifact positions, plus a relative `tensor_file` and zero-based `tensor_index`.
+Each editing batch atomically publishes uncompressed `reconstructed` and `edited`
+uint8 tensors in RGB `[N, 3, height, width]` layout. New runs save no PNG files;
+VAE decoding and pixel quantization still run. Historical PNG outputs are retained.
+At 512x512, two results occupy 1.5 MiB per sample; a full 1,400-sample, four-method
+run stores about 8.2 GiB of pixels. See [tensor loading examples](docs/artifacts.md#rgb-tensor-outputs).
 
 Changing attention fractions or editing policies reuses compatible inversions.
 Changing steps or guidance selects another artifact group. Other effective

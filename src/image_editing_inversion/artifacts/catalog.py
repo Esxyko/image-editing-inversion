@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import ExitStack, contextmanager
 import json
 from pathlib import Path
 import re
 from tempfile import TemporaryDirectory
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 from uuid import uuid4
 
 from .._project import project_paths
-from .collection import ArtifactCollection, ArtifactReference
+from .collection import ArtifactCollection, ArtifactReference, _ArtifactCollectionReader
 from .inversion import ArtifactSettings, InversionArtifact
 from .layout import ArtifactGroup, method_directory_name, pipeline_group_name, pipeline_group_parameters
 
@@ -36,6 +37,26 @@ def _key(inputs: Mapping[str, Any]) -> str:
 def _file_digest(path: Path) -> str:
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+class _CatalogLookupBatch:
+    """Reuse native collection readers until one cache-lookup batch finishes."""
+
+    def __init__(
+        self, catalog: ArtifactCatalog, settings: ArtifactSettings, resources: ExitStack,
+    ) -> None:
+        self._catalog = catalog
+        self._settings = settings
+        self._resources = resources
+        self._readers: dict[Path, _ArtifactCollectionReader] = {}
+
+    def lookup(self, inputs: Mapping[str, Any]) -> tuple[InversionArtifact, ArtifactReference] | None:
+        return self._catalog._lookup(inputs, batch=self)
+
+    def load(self, collection: ArtifactCollection, reference: ArtifactReference) -> InversionArtifact:
+        if collection.path not in self._readers:
+            self._readers[collection.path] = self._resources.enter_context(collection.reader())
+        return self._readers[collection.path].load(reference, settings=self._settings)
 
 
 class ArtifactCatalog:
@@ -136,6 +157,18 @@ class ArtifactCatalog:
     def lookup(
         self, inputs: Mapping[str, Any], *, settings: ArtifactSettings,
     ) -> tuple[InversionArtifact, ArtifactReference] | None:
+        with self.lookup_batch(settings=settings) as batch:
+            return batch.lookup(inputs)
+
+    @contextmanager
+    def lookup_batch(self, *, settings: ArtifactSettings) -> Iterator[_CatalogLookupBatch]:
+        """Close every shared reader before staging or replacing a group file."""
+        with ExitStack() as resources:
+            yield _CatalogLookupBatch(self, settings, resources)
+
+    def _lookup(
+        self, inputs: Mapping[str, Any], *, batch: _CatalogLookupBatch,
+    ) -> tuple[InversionArtifact, ArtifactReference] | None:
         normalized = _normalize(inputs)
         entry = self._entries.get(_key(normalized))
         if entry is None or entry["inputs"] != normalized:
@@ -146,7 +179,7 @@ class ArtifactCatalog:
             if collection is None:
                 return None
             reference = ArtifactReference(path, entry["index"], entry["sample_uid"])
-            artifact = collection.load(reference, settings=settings)
+            artifact = batch.load(collection, reference)
             if (artifact.provenance is None
                     or artifact.provenance.method_parameters != normalized.get("method_parameters")):
                 return None

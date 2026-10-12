@@ -24,7 +24,7 @@ class BatchTiming:
     def __post_init__(self) -> None:
         stages = {
             "inversion": ("input_read", "cache_lookup", "method", "validation", "staging"),
-            "edit": ("input_read", "preparation", "editor", "image_write"),
+            "edit": ("input_read", "preparation", "editor", "tensor_write"),
             "publication": ("publication",),
         }
         for stage in stages[self.phase]:
@@ -60,7 +60,7 @@ class BatchTiming:
 
     def values(self, error: BaseException | None = None) -> dict[str, Any]:
         values = {
-            "schema_version": 1,
+            "schema_version": 2,
             "batch_id": self.batch_id,
             "phase": self.phase,
             "sample_count": self.sample_count,

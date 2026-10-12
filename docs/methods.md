@@ -26,7 +26,7 @@ uv run diffuse --method ddim --h-params ALL
 ```
 
 The runner saves or reuses the terminal latent and provenance through the
-artifact catalog, then produces `reconstructed.png` and `edited.png` with the shared
+artifact catalog, then produces reconstructed and edited RGB pixel tensors with the shared
 Prompt-to-Prompt policy. DDIM artifacts have no per-step state and need no
 denoising hook. Inversion uses `runtime.inversion_batch_size`; reconstruction and
 editing use `runtime.batch_size`. Saved DDIM artifacts can be replayed with
@@ -77,7 +77,11 @@ sequential offload is rejected because optimization needs the UNet to remain
 resident through backward passes. Float16, bfloat16, and float32 use the existing
 hardware restrictions. Inversion uses `runtime.inversion_batch_size`; each image
 keeps its own float32 Adam parameters, optimizer state, and early stopping
-decision. Only active images participate in optimization model calls.
+decision. One optimizer handles the batch's independent parameters, using CUDA
+foreach updates or the ordinary implementation on other devices. Inactive
+parameters have no gradient and receive no Adam update. Only active images
+participate in optimization model calls. Per-image MSE is computed together and
+summed for backward, preserving the individual gradient scale.
 Reconstruction and editing use `runtime.batch_size`.
 
 To compare all four bundled methods over the entire dataset with shared settings:
@@ -97,6 +101,10 @@ exported as `NullTextInversion` from `image_editing_inversion.inversion`.
 Null-text artifacts also store `actual_num_inner_steps`, a positive int64 count
 per timestep for each sample. Counts include every completed Adam update,
 including the update on the iteration that triggers early stopping.
+They also store `reconstruction_mse`, a float32 latent MSE per timestep,
+measured against that step's target pivot after all Adam updates using the saved
+embedding. The final entry compares the reconstructed latent with the source
+image's encoded latent, rather than comparing decoded image pixels.
 
 Null-text artifacts store the terminal pivot plus `null_text_embeddings` of
 shape `[T, 1, token_count, embedding_dim]` in descending denoising order and the
@@ -176,9 +184,11 @@ and omitted keys use these defaults:
 Averaging windows use zero-based prediction indices, including the initial
 prediction at index 0, with an exclusive end. Each window must satisfy
 `0 <= start < end <= effective_refinements + 1`, even when averaging is disabled.
-Reduce the windows as well when reducing the iteration counts. With the default
-settings, each timestep below 250 makes 6 UNet calls and each later timestep
-makes 10; averaging adds no UNet call. Disabling averaging uses the last estimate.
+Reduce the windows as well when reducing the iteration counts. Averaging runs
+predictions only through the selected window's exclusive end; later predictions
+cannot contribute to its result. With the default averaging settings, each
+timestep below 250 makes 5 UNet calls and each later timestep makes 10. Disabling
+averaging uses the last estimate and runs all refinements (6/10 default calls).
 These settings are independent of the shared experiment YAML.
 
 ```powershell

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from diffusers import DDIMScheduler, StableDiffusionPipeline
 import torch
 
 from ..config import ExperimentConfig
+from ..artifacts import normalize_scheduler_config
 from .identity import ModelContentIdentity
 
 
@@ -67,9 +69,93 @@ class ModelRuntime:
         pipeline.unet.eval()
         pipeline.text_encoder.eval()
         pipeline.vae.eval()
-        self.pipeline = pipeline
+        self._pipeline: StableDiffusionPipeline | None = pipeline
+        self._empty_embeddings: torch.Tensor | None = None
+        self._schedules: dict[int, tuple[int, ...]] = {}
+        self._cache_schedule()
         self.model_commit = commit
         self.model_content_identity = ModelContentIdentity(model_path).describe(pipeline)
+
+    @property
+    def pipeline(self) -> StableDiffusionPipeline:
+        if self._pipeline is None:
+            raise RuntimeError("The model runtime is closed")
+        return self._pipeline
+
+    def _cache_schedule(self) -> None:
+        scheduler = self.pipeline.scheduler
+        self._expected_timesteps = tuple(int(step) for step in scheduler.timesteps.tolist())
+        self._scheduler_config = normalize_scheduler_config(scheduler.config)
+        self._schedules.clear()
+        self._schedules[self.config.sampling.num_inference_steps] = self._expected_timesteps
+
+    @property
+    def expected_timesteps(self) -> tuple[int, ...]:
+        return self._expected_timesteps
+
+    @property
+    def scheduler_config(self) -> dict[str, Any]:
+        return deepcopy(self._scheduler_config)
+
+    def timesteps_for_steps(self, steps: int) -> tuple[int, ...]:
+        if steps not in self._schedules:
+            scheduler = type(self.pipeline.scheduler).from_config(self.pipeline.scheduler.config)
+            scheduler.set_timesteps(steps, device="cpu")
+            self._schedules[steps] = tuple(int(step) for step in scheduler.timesteps.tolist())
+        return self._schedules[steps]
+
+    def to_device(
+        self, tensor: torch.Tensor, *, dtype: torch.dtype | None = None,
+    ) -> torch.Tensor:
+        """Apply this runtime's pinning and device-transfer settings."""
+        if self.device.type == "cuda" and tensor.device.type == "cpu":
+            if self.config.runtime.pin_memory and not tensor.is_pinned():
+                tensor = tensor.pin_memory()
+            return tensor.to(
+                device=self.device, dtype=dtype,
+                non_blocking=self.config.runtime.pin_memory,
+            )
+        return tensor.to(device=self.device, dtype=dtype)
+
+    def encode_prompts(self, prompts: list[str]) -> torch.Tensor:
+        tokenizer = self.pipeline.tokenizer
+        tokens = tokenizer(
+            prompts, padding="max_length", max_length=tokenizer.model_max_length,
+            truncation=False, return_tensors="pt",
+        )
+        if tokens.input_ids.shape[-1] != tokenizer.model_max_length:
+            raise ValueError("Caption exceeds the model's CLIP token limit")
+        return self.pipeline.text_encoder(self.to_device(tokens.input_ids))[0]
+
+    @torch.inference_mode(False)
+    @torch.no_grad()
+    def empty_prompt_embeddings(self, count: int) -> torch.Tensor:
+        """Cache an ordinary detached tensor suitable for later Null-text autograd."""
+        if count < 1:
+            raise ValueError("Empty prompt encoding requires a positive batch size")
+        if self._empty_embeddings is None:
+            self._empty_embeddings = self.encode_prompts([""]).detach().cpu().contiguous()
+        return self.to_device(self._empty_embeddings).expand(count, -1, -1).contiguous()
+
+    def close(self) -> None:
+        """Release invocation-owned references even if offload cleanup fails."""
+        error: BaseException | None = None
+        try:
+            if self._pipeline is not None:
+                for cleanup in (self._pipeline.maybe_free_model_hooks, self._pipeline.remove_all_hooks):
+                    try:
+                        cleanup()
+                    except BaseException as exc:
+                        if error is None:
+                            error = exc
+                        else:
+                            error.add_note(f"Model hook removal failed: {exc}")
+            if error is not None:
+                raise error
+        finally:
+            self._empty_embeddings = None
+            self._schedules.clear()
+            self._pipeline = None
 
     def component_content_identity(self, components: tuple[str, ...]) -> dict[str, Any]:
         return ModelContentIdentity.for_components(self.model_content_identity, components)
@@ -83,6 +169,7 @@ class ModelRuntime:
             config.sampling.num_inference_steps, device=self.device
         )
         self.config = config
+        self._cache_schedule()
 
     def inversion_cache_settings(self) -> dict[str, Any]:
         """Keep precision and VAE tiling; tolerate minor execution differences."""

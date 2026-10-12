@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+from collections.abc import Iterator, Mapping
+from typing import Any, Callable
 
 from datasets import Dataset
 
@@ -10,6 +11,31 @@ from .identity import DatasetContentIdentity
 from .._project import project_paths
 from .loader import load_project_dataset
 from .schema import HUB_DATASET_REF, REQUIRED_COLUMNS, validate_dataset_source
+
+
+class _ModelSample(Mapping[str, Any]):
+    """Decode masks only when an adapter actually requests the reserved column."""
+
+    def __init__(
+        self, values: dict[str, Any], columns: tuple[str, ...], mask: Callable[[], Any],
+    ) -> None:
+        self._values = values
+        self._columns = columns
+        self._mask = mask
+
+    def __getitem__(self, key: str) -> Any:
+        if key == "mask_img" and key not in self._values:
+            self._values[key] = self._mask()
+        return self._values[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._columns)
+
+    def __len__(self) -> int:
+        return len(self._columns)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._columns
 
 
 class DatasetRepository:
@@ -33,6 +59,10 @@ class DatasetRepository:
         self._uid_to_index = {uid: index for index, uid in enumerate(uids)}
         if len(self._uid_to_index) != len(uids):
             raise ValueError("The dataset contains duplicate UIDs.")
+        self._model_data = self.dataset.select_columns(
+            ["uid", "source_img", "source_prompt", "target_prompt"],
+        )
+        self._masks = self.dataset.select_columns(["mask_img"])
         self._content_identity = DatasetContentIdentity(self.dataset, resolved_path)
         self._content_digest: str | None = None
 
@@ -79,3 +109,14 @@ class DatasetRepository:
             raise ValueError("Artifact dataset fingerprint differs from selected dataset.")
         if sample_uid not in self._uid_to_index:
             raise ValueError(f"Artifact UID not found in dataset: {sample_uid}")
+
+    def model_sample(self, uid: str) -> Mapping[str, Any]:
+        """Read model inputs eagerly while retaining lazy mask access for adapters."""
+        try:
+            index = self._uid_to_index[uid]
+        except KeyError as exc:
+            raise ValueError(f"Dataset UID not found: {uid}") from exc
+        return _ModelSample(
+            self._model_data[index], tuple(self.dataset.column_names),
+            lambda: self._masks[index]["mask_img"],
+        )

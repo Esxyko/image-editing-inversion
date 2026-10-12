@@ -19,6 +19,16 @@ class PairAttentionMap:
     refinement_alpha: torch.Tensor | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _BatchedPairAttentionMap:
+    """Default-policy token maps grouped by replacement/refinement mode."""
+
+    mode: str
+    pair_indices: torch.Tensor
+    mapping: torch.Tensor
+    alpha: torch.Tensor | None = None
+
+
 def _prompt_ids(tokenizer: Any, prompt: str, max_length: int) -> list[int]:
     ids = tokenizer.encode(prompt, add_special_tokens=True)
     if len(ids) > max_length:
