@@ -1,0 +1,59 @@
+{
+  "dataset": null,
+  "parameter_files": [
+    {
+      "counts": {
+        "error": 0,
+        "ok": 5600,
+        "skipped": 0
+      },
+      "directory": "default.yaml",
+      "methods": [
+        {
+          "counts": {
+            "error": 0,
+            "ok": 1400,
+            "skipped": 0
+          },
+          "directory": "default.yaml/ddim",
+          "method_id": "ddim",
+          "status": "ok"
+        },
+        {
+          "counts": {
+            "error": 0,
+            "ok": 1400,
+            "skipped": 0
+          },
+          "directory": "default.yaml/direct-inversion",
+          "method_id": "direct-inversion",
+          "status": "ok"
+        },
+        {
+          "counts": {
+            "error": 0,
+            "ok": 1400,
+            "skipped": 0
+          },
+          "directory": "default.yaml/null-text",
+          "method_id": "null-text",
+          "status": "ok"
+        },
+        {
+          "counts": {
+            "error": 0,
+            "ok": 1400,
+            "skipped": 0
+          },
+          "directory": "default.yaml/renoise",
+          "method_id": "renoise",
+          "status": "ok"
+        }
+      ],
+      "pipeline_h_params_file": "default.yaml",
+      "status": "ok"
+    }
+  ],
+  "schema_version": 2,
+  "status": "ok"
+}
