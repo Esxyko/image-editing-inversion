@@ -10,7 +10,7 @@ from dataclasses import asdict, dataclass, replace
 from functools import partial
 import math
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Protocol, Sequence
 
 import torch
 import yaml
@@ -39,6 +39,21 @@ _EMBEDDINGS_KEY = "null_text_embeddings"
 _INNER_STEPS_KEY = "actual_num_inner_steps"
 _RECONSTRUCTION_MSE_KEY = "reconstruction_mse"
 _require_finite = partial(require_finite, label="Null-text")
+
+
+class _OptimizationObserver(Protocol):
+    """Observe existing optimization evaluations without changing the trajectory."""
+
+    def start_step(self, step_index: int, timestep: int, learning_rate: float, tolerance: float) -> None: ...
+
+    def before_update(
+        self, active: Sequence[int], losses: torch.Tensor,
+        gradients: Sequence[torch.Tensor], parameters: Sequence[torch.Tensor], dtype: torch.dtype,
+    ) -> None: ...
+
+    def after_update(self, active: Sequence[int], parameters: Sequence[torch.Tensor], dtype: torch.dtype) -> None: ...
+
+    def finish_step(self, errors: torch.Tensor, counts: Sequence[int], latent: torch.Tensor) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -295,6 +310,7 @@ class NullTextInversion(InversionMethod):
         conditional: torch.Tensor,
         settings: _NullTextSettings,
         context: InversionContext,
+        *, observer: _OptimizationObserver | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         editor = context.editor
         scale = context.config.sampling.guidance_scale
@@ -324,6 +340,10 @@ class NullTextInversion(InversionMethod):
                 tolerance = (
                     settings.early_stop_epsilon + step_index * settings.epsilon_increment
                 )
+                if observer is not None:
+                    observer.start_step(
+                        step_index, int(timestep), optimizer.param_groups[0]["lr"], tolerance,
+                    )
                 model_input = editor.scheduler.scale_model_input(latent, timestep)
                 with torch.no_grad():
                     conditional_prediction = editor.pipeline.unet(
@@ -353,7 +373,11 @@ class NullTextInversion(InversionMethod):
                     if any(gradient is None for gradient in gradients):
                         raise RuntimeError("Null-text optimization did not receive embedding gradients")
                     require_finite_many(gradients, "embedding gradients", "Null-text")
+                    if observer is not None:
+                        observer.before_update(active, losses, gradients, parameters, editor.dtype)
                     optimizer.step()
+                    if observer is not None:
+                        observer.after_update(active, parameters, editor.dtype)
                     for index in active:
                         counts[index] += 1
                     require_finite_many(
@@ -388,7 +412,10 @@ class NullTextInversion(InversionMethod):
                     # Measure after the last Adam update using the saved embedding.
                     errors = (latent.float() - target.float()).square().flatten(1).mean(1)
                     _require_finite(errors, "reconstruction MSE")
-                    reconstruction_errors.append(errors.to(device="cpu"))
+                    errors_cpu = errors.to(device="cpu")
+                    reconstruction_errors.append(errors_cpu)
+                    if observer is not None:
+                        observer.finish_step(errors_cpu, counts, latent)
         return (
             torch.stack(saved_embeddings).contiguous(),
             torch.tensor(inner_steps, dtype=torch.int64, device="cpu"),

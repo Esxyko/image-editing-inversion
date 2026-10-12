@@ -94,6 +94,29 @@ compatible inversions; existing artifacts outside the prefix remain published.
 Limited runs record the requested count in the top-level `nsamples` field of
 `sweep.json`.
 
+For a temporary Null-text diagnostic run with the same sample selection, model,
+hyperparameters, inversion/edit batch sizes, and RGB outputs:
+
+```powershell
+uv run experiment-diagnostic --method null-text --h-params high_steps.yaml --nsamples 64
+```
+
+This command supports only `null-text`; omitting `--method` selects it. The other
+experiment arguments, including `--dataset`, have the same meanings. It always
+recomputes inversion, source encodings, and conditional pivots. It publishes the
+selected prefix into the ordinary Null-text artifact group, as a fresh experiment
+does, but does not register these diagnostic inversions as cache hits for later runs.
+
+Under `data/output/<run-id>/high_steps.yaml/null-text/`, the ordinary outputs are
+accompanied by `optimization.jsonl` (one sample/timestep per line),
+`reconstruction.jsonl` (final reconstruction diagnostics per sample), and
+`diagnostic-config.json` (actual schedules, scheduler configurations, versions,
+and source hashes). Losses, gradient/update norms, and the fraction of embedding
+elements changed after conversion to the model dtype are collected from the
+existing evaluations; no extra UNet calls are made. Recording adds runtime overhead,
+so use ordinary experiments to compare execution times. See
+[diagnostic field definitions](docs/artifacts.md#temporary-null-text-diagnostics).
+
 Invert, reconstruct, and edit every project record with one parameter file:
 
 ```powershell

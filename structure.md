@@ -24,6 +24,7 @@ Configuration and storage locations are fixed relative to `src/`.
 |-- .env.example                    # HF_TOKEN template; .env is ignored
 `-- src/image_editing_inversion/
     |-- __init__.py, cli.py          # diffuse/experiment exports and command parsing
+    |-- diagnostic.py              # Temporary experiment-diagnostic CLI (Null-text only)
     |-- _project.py                 # Internal source-relative fixed paths
     |-- config/
     |   |-- models.py               # Validated settings and hardware checks
@@ -57,7 +58,8 @@ Configuration and storage locations are fixed relative to `src/`.
         |-- preflight.py            # Model-free and scheduler sweep validation
         |-- inversion.py            # Reuse, missing-image inversion, publication
         |-- replay.py, editing.py   # Artifact preparation and editing coordination
-        `-- models.py, timing.py, output.py # Records, clocks, manifests, RGB tensor batches
+        |-- models.py, timing.py, output.py # Records, clocks, manifests, RGB tensor batches
+        `-- null_text_diagnostic.py # Temporary observing adapter/session and diagnostic JSONL
 ```
 
 ## Ownership and boundaries

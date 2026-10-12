@@ -33,6 +33,7 @@ explicit = true
 [project.scripts]
 diffuse = "image_editing_inversion:diffuse"
 experiment = "image_editing_inversion:experiment"
+experiment-diagnostic = "image_editing_inversion.diagnostic:experiment"
 
 [project.entry-points."image_editing_inversion.methods"]
 ddim = "image_editing_inversion.inversion.methods.ddim:DDIMInversion"

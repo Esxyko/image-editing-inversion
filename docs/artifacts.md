@@ -241,6 +241,57 @@ edited_hwc = edited_chw.permute(1, 2, 0).contiguous()  # RGB uint8 [H, W, 3]
 edited_float = edited_chw.float() / 255.0            # RGB float32 [3, H, W] in [0, 1]
 ```
 
+## Temporary Null-text diagnostics
+
+`experiment-diagnostic` runs the ordinary Null-text inversion/reconstruction/edit
+workflow with fresh source encodings, pivots, and inversions. It writes three
+additional files beside `results.jsonl`; each result references their filenames.
+The command uses the ordinary Null-text artifact group and replaces its selected
+UID prefix on publication, but final inversion cache reuse is disabled for this run.
+
+`optimization.jsonl` streams one completed optimization timestep per sample,
+including UID, source/target prompts, zero-based `step_index`, actual `timestep`,
+`target_pivot_index`, and `target_timestep` (`null` for the original source latent).
+Metrics are defined as follows:
+
+| Field | Meaning |
+| --- | --- |
+| `inner_losses` | MSE before each Adam update, in update order |
+| `loss_before` | First entry of `inner_losses` |
+| `loss_after` | MSE measured after the last Adam update; matches that sample's `reconstruction_mse[step_index]` |
+| `best_loss` | Minimum of the observed pre-update losses and final post-update loss |
+| `gradient_norms` | L2 norm of the unconditional embedding's float32 gradient for each update |
+| `embedding_update_norms` | L2 norm of the float32 embedding parameter change per update |
+| `effective_embedding_change_fraction` | Fraction of embedding elements that differ before/after an update after both are cast to the model dtype |
+| `learning_rate`, `early_stop_threshold` | Actual step-specific optimizer learning rate and stopping threshold |
+| `actual_num_inner_steps` | Number of Adam updates; also the length of all per-update arrays |
+| `stop_reason` | `threshold_reached` if the last pre-update loss is below the threshold, otherwise `max_inner_steps` |
+| `early_stop_loss_before_update` | Last pre-update loss, used by the ordinary early-stop check |
+| `loss_after_below_threshold` | Whether the final post-update loss also satisfies the threshold |
+
+All losses compare scaled VAE latents in float32, not decoded RGB pixels. The
+ordinary algorithm checks the pre-update loss after applying Adam; recording
+preserves this behavior. Nonfinite diagnostic norms are serialized as strings
+`nan`, `inf`, or `-inf`; the ordinary finite-value checks still apply to model
+losses, gradients, embeddings, and latents. Completed steps remain available if
+a later step or editing phase fails.
+
+`reconstruction.jsonl` measures the final source branch before VAE decoding:
+
+| Field | Meaning |
+| --- | --- |
+| `optimization_source_latent_mse` | Final optimized latent vs. original encoded source latent; matches `final_reconstruction_mse` |
+| `replay_source_latent_mse` | Actual reconstruction latent from the editing pass vs. the same encoded source latent |
+| `replay_optimized_latent_mse` | Actual reconstruction latent vs. the final optimized latent; isolates disagreement between optimization and replay |
+
+`diagnostic-config.json` records both scheduler configurations and timestep
+lists, model/dataset identities, model and embedding parameter dtypes,
+hyperparameters, dependency/Python versions, and hashes of the relevant source
+files. Diagnostics use detached observations and do not add UNet forward calls.
+The temporary observer retains the encoded source and final optimized latent
+for each selected sample until that sample's editing batch is prepared. Output
+recording and diagnostic reductions add overhead to the reported timings.
+
 ## Results and timing
 
 `edit_batch_seconds` retains the preparation-plus-editor wall time, excluding input
