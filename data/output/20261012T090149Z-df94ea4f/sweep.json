@@ -1,0 +1,60 @@
+{
+  "dataset": null,
+  "nsamples": 128,
+  "parameter_files": [
+    {
+      "counts": {
+        "error": 0,
+        "ok": 512,
+        "skipped": 0
+      },
+      "directory": "high_steps.yaml",
+      "methods": [
+        {
+          "counts": {
+            "error": 0,
+            "ok": 128,
+            "skipped": 0
+          },
+          "directory": "high_steps.yaml/ddim",
+          "method_id": "ddim",
+          "status": "ok"
+        },
+        {
+          "counts": {
+            "error": 0,
+            "ok": 128,
+            "skipped": 0
+          },
+          "directory": "high_steps.yaml/direct-inversion",
+          "method_id": "direct-inversion",
+          "status": "ok"
+        },
+        {
+          "counts": {
+            "error": 0,
+            "ok": 128,
+            "skipped": 0
+          },
+          "directory": "high_steps.yaml/null-text",
+          "method_id": "null-text",
+          "status": "ok"
+        },
+        {
+          "counts": {
+            "error": 0,
+            "ok": 128,
+            "skipped": 0
+          },
+          "directory": "high_steps.yaml/renoise",
+          "method_id": "renoise",
+          "status": "ok"
+        }
+      ],
+      "pipeline_h_params_file": "high_steps.yaml",
+      "status": "ok"
+    }
+  ],
+  "schema_version": 2,
+  "status": "ok"
+}
