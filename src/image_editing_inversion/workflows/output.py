@@ -144,6 +144,7 @@ class RunOutput:
         dataset_location: str,
         pipeline_h_params_file: Path,
         method_id: str,
+        *, method_h_params: Mapping[str, Any] | None = None,
     ) -> None:
         self.dataset_ref = dataset_ref
         self.dataset_fingerprint = dataset_fingerprint
@@ -161,6 +162,7 @@ class RunOutput:
             "config": config.to_dict(),
             "pipeline_h_params_file": self.pipeline_h_params_file,
             "method_id": self.method_id,
+            "method_h_params": None if method_h_params is None else dict(method_h_params),
             "dataset_ref": self.dataset_ref,
             "dataset_fingerprint": self.dataset_fingerprint,
             "dataset_location": self.dataset_location,

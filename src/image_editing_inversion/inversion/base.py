@@ -78,6 +78,15 @@ class InversionMethod(ABC):
     def validate_inversion_config(self, config: ExperimentConfig) -> None:
         """Optionally validate inversion settings without loading model weights."""
 
+    def method_h_params(self, config: ExperimentConfig) -> Mapping[str, Any]:
+        """Return resolved, JSON-compatible method hyperparameters for run snapshots.
+
+        Include defaults and reuse the settings loaded for inversion. The default
+        describes a method without separate hyperparameters. Replay does not call
+        this method.
+        """
+        return {}
+
     def validate_inversion_context(self, context: InversionContext) -> None:
         """Optionally validate the actual scheduler before processing any samples."""
 

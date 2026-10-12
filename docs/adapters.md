@@ -26,6 +26,15 @@ Override the optional `validate_replay(artifact, context)` to check method-speci
 state or configuration before the runner creates that hook; the default does
 nothing. Direct editor callers should invoke this validation themselves before
 creating a method's hook.
+
+Override `method_h_params(config)` to expose resolved method hyperparameters in
+each inversion run's `resolved-config.json`. Return a JSON-compatible mapping
+that includes defaults and uses the same loaded settings as inversion. The default
+returns `{}` for methods without separate hyperparameters. The workflow captures
+this snapshot after configuration preflight; explicit replay does not call it.
+This reporting hook does not affect cache identity, which remains controlled by
+`inversion_cache_parameters(context)`.
+
 Adapters can override `invert_batch(samples, context)` to perform batched model
 calls and must return one artifact per input, in input order. The workflow supplies
 up to `runtime.inversion_batch_size` uncached samples. The default implementation

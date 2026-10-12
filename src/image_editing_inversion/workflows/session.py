@@ -6,6 +6,7 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from itertools import groupby
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Mapping, Sequence
 
@@ -69,6 +70,7 @@ class WorkflowSession:
         self._active_method_id: str | None = None
         self._parameter_path: Path | None = None
         self._methods: dict[str, InversionMethod] = {}
+        self._method_h_params: dict[tuple[Path, str], Mapping[str, Any]] = {}
         self._repository: DatasetRepository | None = None
         self._editor: Editor | None = None
         self._replay: ReplayPreparer | None = None
@@ -162,6 +164,12 @@ class WorkflowSession:
             methods = list(self._methods.values())
             preflight = SweepPreflight(self._parameter_configs, methods, self._sweep_output)
             preflight.configuration()
+            self._method_h_params = {
+                (path, method.method_id): json.loads(json.dumps(
+                    dict(method.method_h_params(config)), allow_nan=False,
+                ))
+                for path, config in self._parameter_configs for method in methods
+            }
             self._load_dataset()
             uids = self.repository.select_uids(self._dataset_source)
             if self._nsamples is not None:
@@ -219,6 +227,7 @@ class WorkflowSession:
                 self.output_dir / self._parameter_path.name / method_id,
                 self.config, self.dataset_ref, self.dataset_fingerprint,
                 self.dataset_location, self._parameter_path, method_id,
+                method_h_params=self._method_h_params.get((self._parameter_path, method_id)),
             )
         output = self._outputs[method_id]
         return output

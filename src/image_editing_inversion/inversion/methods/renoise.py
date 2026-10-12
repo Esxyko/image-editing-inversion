@@ -6,7 +6,7 @@ and stochastic noise correction are outside this adapter's scope.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -158,6 +158,9 @@ class ReNoiseInversion(InversionMethod):
         if self._settings is None:
             self._settings = _ReNoiseSettings.load(config.project.method_h_params / _SETTINGS_FILENAME)
         return self._settings
+
+    def method_h_params(self, config: ExperimentConfig) -> Mapping[str, Any]:
+        return asdict(self._inversion_settings(config))
 
     def inversion_cache_parameters(self, context: InversionContext) -> Mapping[str, Any]:
         settings = self._inversion_settings(context.config)

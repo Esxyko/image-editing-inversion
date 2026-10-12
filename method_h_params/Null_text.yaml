@@ -2,5 +2,5 @@
 # These settings are independent of the shared experiment YAML.
 num_inner_steps: 10
 learning_rate: 0.01
-early_stop_epsilon: 0.00002
-epsilon_increment: 0.00004
+early_stop_epsilon: 0.00004
+epsilon_increment: 0.00008

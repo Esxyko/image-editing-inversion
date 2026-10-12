@@ -351,6 +351,16 @@ parameter file. Results are written under `data/output/<run-id>/` with a
 schema-v2 `sweep.json` manifest and `<parameter-file>/<method>/` children containing
 `results.jsonl`, `batches.jsonl`, `resolved-config.json`, and images per sample under `images/`.
 
+For inversion runs, `resolved-config.json` also contains `method_h_params`: the
+method's resolved hyperparameters, including defaults, captured from the same
+adapter settings used by inversion. Null-text records `num_inner_steps`,
+`learning_rate`, `early_stop_epsilon`, and `epsilon_increment`; ReNoise records
+its refinement counts, averaging flag, and averaging ranges. Methods without
+separate hyperparameters record `{}`. Cached inversion runs retain the requested
+method settings alongside the per-sample `artifact_reused` flag. Explicit replay
+records `null`, since it does not load or use method parameter files; this field
+does not claim to describe the original production settings of replayed artifacts.
+
 The manifest includes a top-level `dataset` field from its initial creation:
 `"pie-bench"` or `"magic-brush"` for a selected source, and `null` when the
 argument is omitted or the workflow replays saved artifacts. The field is
