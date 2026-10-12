@@ -1,0 +1,332 @@
+{
+  "config": {
+    "methods": {},
+    "model": {
+      "height": 512,
+      "model_id": "stable-diffusion-v1-5/stable-diffusion-v1-5",
+      "revision": "451f4fe16113bff5a5d2269ed5ad43b0592e9a14",
+      "width": 512
+    },
+    "prompt_to_prompt": {
+      "cross_replace_fraction": 0.6,
+      "mode": "auto",
+      "self_replace_fraction": 0.4
+    },
+    "runtime": {
+      "attention_query_chunk_size": 4096,
+      "batch_size": 64,
+      "cpu_offload": "none",
+      "device": "cuda",
+      "dtype": "float16",
+      "inversion_batch_size": 16,
+      "num_workers": 4,
+      "pin_memory": true,
+      "vae_slicing": true,
+      "vae_tiling": false
+    },
+    "sampling": {
+      "eta": 0.0,
+      "guidance_scale": 7.5,
+      "num_inference_steps": 20,
+      "seed": 42
+    }
+  },
+  "dataset_content": "3fc77b7baa92c68327fe127e6a83fbbd0786e99f5813eb4eca9e85d284732685",
+  "dataset_fingerprint": "3c08518e41865876",
+  "dataset_ref": "beatle-ju1ce/image-editing-inversion",
+  "device": "cuda:0",
+  "early_stop_phase": "before the last Adam update, matching ordinary Null-text",
+  "embedding_parameter_dtype": "torch.float32",
+  "forward_scheduler_config": {
+    "beta_end": 0.012,
+    "beta_schedule": "scaled_linear",
+    "beta_start": 0.00085,
+    "clip_sample": false,
+    "num_train_timesteps": 1000,
+    "prediction_type": "epsilon",
+    "rescale_betas_zero_snr": false,
+    "set_alpha_to_one": false,
+    "skip_prk_steps": true,
+    "steps_offset": 1,
+    "thresholding": false,
+    "timestep_spacing": "leading",
+    "trained_betas": null
+  },
+  "forward_timesteps": [
+    951,
+    901,
+    851,
+    801,
+    751,
+    701,
+    651,
+    601,
+    551,
+    501,
+    451,
+    401,
+    351,
+    301,
+    251,
+    201,
+    151,
+    101,
+    51,
+    1
+  ],
+  "inner_losses_phase": "before each Adam update; loss_after is measured after the last update",
+  "intermediate_cache_enabled": false,
+  "inverse_scheduler_config": {
+    "beta_end": 0.012,
+    "beta_schedule": "scaled_linear",
+    "beta_start": 0.00085,
+    "clip_sample": false,
+    "num_train_timesteps": 1000,
+    "prediction_type": "epsilon",
+    "rescale_betas_zero_snr": false,
+    "set_alpha_to_one": false,
+    "skip_prk_steps": true,
+    "steps_offset": 1,
+    "thresholding": false,
+    "timestep_spacing": "leading",
+    "trained_betas": null
+  },
+  "inverse_timesteps": [
+    1,
+    51,
+    101,
+    151,
+    201,
+    251,
+    301,
+    351,
+    401,
+    451,
+    501,
+    551,
+    601,
+    651,
+    701,
+    751,
+    801,
+    851,
+    901,
+    951
+  ],
+  "inversion_cache_enabled": false,
+  "loss_space": "float32 MSE of scaled VAE latents; not decoded RGB pixels",
+  "method_h_params": {
+    "early_stop_epsilon": 8e-05,
+    "epsilon_increment": 0.00016,
+    "learning_rate": 0.01,
+    "num_inner_steps": 10
+  },
+  "method_id": "null-text",
+  "model_commit": "451f4fe16113bff5a5d2269ed5ad43b0592e9a14",
+  "model_content": {
+    "components": {
+      "text_encoder": {
+        "architectures": [
+          "CLIPTextModel"
+        ],
+        "attention_dropout": 0.0,
+        "bos_token_id": 0,
+        "chunk_size_feed_forward": 0,
+        "dropout": 0.0,
+        "eos_token_id": 2,
+        "hidden_act": "quick_gelu",
+        "hidden_size": 768,
+        "id2label": {
+          "0": "LABEL_0",
+          "1": "LABEL_1"
+        },
+        "initializer_factor": 1.0,
+        "initializer_range": 0.02,
+        "intermediate_size": 3072,
+        "is_encoder_decoder": false,
+        "label2id": {
+          "LABEL_0": 0,
+          "LABEL_1": 1
+        },
+        "layer_norm_eps": 1e-05,
+        "max_position_embeddings": 77,
+        "model_type": "clip_text_model",
+        "num_attention_heads": 12,
+        "num_hidden_layers": 12,
+        "output_attentions": false,
+        "output_hidden_states": false,
+        "pad_token_id": 1,
+        "problem_type": null,
+        "projection_dim": 768,
+        "return_dict": true,
+        "vocab_size": 49408
+      },
+      "unet": {
+        "_class_name": "UNet2DConditionModel",
+        "act_fn": "silu",
+        "addition_embed_type": null,
+        "addition_embed_type_num_heads": 64,
+        "addition_time_embed_dim": null,
+        "attention_head_dim": 8,
+        "attention_type": "default",
+        "block_out_channels": [
+          320,
+          640,
+          1280,
+          1280
+        ],
+        "center_input_sample": false,
+        "class_embed_type": null,
+        "class_embeddings_concat": false,
+        "conv_in_kernel": 3,
+        "conv_out_kernel": 3,
+        "cross_attention_dim": 768,
+        "cross_attention_norm": null,
+        "down_block_types": [
+          "CrossAttnDownBlock2D",
+          "CrossAttnDownBlock2D",
+          "CrossAttnDownBlock2D",
+          "DownBlock2D"
+        ],
+        "downsample_padding": 1,
+        "dropout": 0.0,
+        "dual_cross_attention": false,
+        "encoder_hid_dim": null,
+        "encoder_hid_dim_type": null,
+        "flip_sin_to_cos": true,
+        "freq_shift": 0,
+        "in_channels": 4,
+        "layers_per_block": 2,
+        "mid_block_only_cross_attention": null,
+        "mid_block_scale_factor": 1,
+        "mid_block_type": "UNetMidBlock2DCrossAttn",
+        "norm_eps": 1e-05,
+        "norm_num_groups": 32,
+        "num_attention_heads": null,
+        "num_class_embeds": null,
+        "only_cross_attention": false,
+        "out_channels": 4,
+        "projection_class_embeddings_input_dim": null,
+        "resnet_out_scale_factor": 1.0,
+        "resnet_skip_time_act": false,
+        "resnet_time_scale_shift": "default",
+        "reverse_transformer_layers_per_block": null,
+        "sample_size": 64,
+        "time_cond_proj_dim": null,
+        "time_embedding_act_fn": null,
+        "time_embedding_dim": null,
+        "time_embedding_type": "positional",
+        "timestep_post_act": null,
+        "transformer_layers_per_block": 1,
+        "up_block_types": [
+          "UpBlock2D",
+          "CrossAttnUpBlock2D",
+          "CrossAttnUpBlock2D",
+          "CrossAttnUpBlock2D"
+        ],
+        "upcast_attention": false,
+        "use_linear_projection": false
+      },
+      "vae": {
+        "_class_name": "AutoencoderKL",
+        "act_fn": "silu",
+        "block_out_channels": [
+          128,
+          256,
+          512,
+          512
+        ],
+        "down_block_types": [
+          "DownEncoderBlock2D",
+          "DownEncoderBlock2D",
+          "DownEncoderBlock2D",
+          "DownEncoderBlock2D"
+        ],
+        "force_upcast": true,
+        "in_channels": 3,
+        "latent_channels": 4,
+        "latents_mean": null,
+        "latents_std": null,
+        "layers_per_block": 2,
+        "mid_block_add_attention": true,
+        "norm_num_groups": 32,
+        "out_channels": 3,
+        "sample_size": 512,
+        "scaling_factor": 0.18215,
+        "shift_factor": null,
+        "up_block_types": [
+          "UpDecoderBlock2D",
+          "UpDecoderBlock2D",
+          "UpDecoderBlock2D",
+          "UpDecoderBlock2D"
+        ],
+        "use_post_quant_conv": true,
+        "use_quant_conv": true
+      }
+    },
+    "files": {
+      "text_encoder/model.safetensors": "d008943c017f0092921106440254dbbe00b6a285f7883ec8ba160c3faad88334",
+      "tokenizer/merges.txt": "9fd691f7c8039210e0fced15865466c65820d09b63988b0174bfe25de299051a",
+      "tokenizer/special_tokens_map.json": "d942bcc18ab0ddb04e69bc1b94af2d5a9ba6944e97f74d2f902fd670dad76baf",
+      "tokenizer/tokenizer_config.json": "c9324d2f2f52d1f40ee1793d70732600abaa7b36b59b2f71575c4f92319f005e",
+      "tokenizer/vocab.json": "66adb65d80004a4c1bac32a87064f2166232c6ed02440db6db9d5619efa8da81",
+      "unet/diffusion_pytorch_model.safetensors": "19da7aaa4b880e59d56843f1fcb4dd9b599c28a1d9d9af7c1143057c8ffae9f1",
+      "vae/diffusion_pytorch_model.safetensors": "a2b5134f4dbc140d9c11f11cba3233099e00af40f262f136c691fb7d38d2194c"
+    },
+    "image_processor": {
+      "do_binarize": false,
+      "do_convert_grayscale": false,
+      "do_convert_rgb": false,
+      "do_normalize": true,
+      "do_resize": true,
+      "reducing_gap": null,
+      "resample": "lanczos",
+      "vae_latent_channels": 4,
+      "vae_scale_factor": 8
+    },
+    "source_encoding": {
+      "color_mode": "RGB",
+      "vae_posterior": "mode"
+    },
+    "tokenizer": {
+      "model_max_length": 77,
+      "padding": "max_length",
+      "padding_side": "right",
+      "special_token_ids": [
+        49406,
+        49407
+      ],
+      "special_tokens": {
+        "bos_token": "<|startoftext|>",
+        "eos_token": "<|endoftext|>",
+        "pad_token": "<|endoftext|>",
+        "unk_token": "<|endoftext|>"
+      },
+      "truncation": false,
+      "truncation_side": "right"
+    }
+  },
+  "model_dtype": "torch.float16",
+  "nonfinite_metric_encoding": "string: nan, inf, or -inf",
+  "package_versions": {
+    "diffusers": "0.40.0",
+    "torch": "2.11.0+cu130",
+    "transformers": "5.17.0"
+  },
+  "pipeline_h_params_file": "high_steps.yaml",
+  "python_version": "3.14.8 | packaged by conda-forge | (main, Oct  7 2026, 00:23:19) [GCC 15.3.0]",
+  "schema_version": 1,
+  "source_sha256": {
+    "diagnostic.py": "5d8f9ce15e550c27b1b092e352cb351c1a94da2dea3fc49de36c6e84dc959fd5",
+    "generation/alignment.py": "0abed15317e3127923d8de5cb9ad0c68130740079a50b74b8532d56486cc5221",
+    "generation/denoising.py": "a7199b5b9075cd7d7ea8f61ff5370033877889e01ef16e02564a1a94bc077dca",
+    "generation/editor.py": "e3419066386bfac4f3caeb03cda560e88a7df7b9dc4e25315523b4ba0eef35ee",
+    "generation/processor.py": "5ae97a80599eb1fffee5581c8b7c04b9e62e0b46bfc490245c9b1199e1f87f89",
+    "generation/prompt_to_prompt.py": "4d457f2217ab98c2f6d6d0c610c8721c454deba8e7370e099bc6e36e55499c38",
+    "generation/runtime.py": "491e8b8831f13ba361e601fe0c437634e8897322bc7d78be06751f12d802e002",
+    "inversion/components.py": "91fb5958669a14d9c9af439b571f1ba874c4a1e68ca8812f964969d28db5f351",
+    "inversion/methods/null_text.py": "bce011b9706fed1ec4fc45460d54d61d2d0cd085afc3172f4ac1fa7f3553e193",
+    "inversion/validation.py": "72a0d71710c0b9e9c3439070c49a567ef7464ad2b8cb306dffbffb2ae7226624",
+    "workflows/null_text_diagnostic.py": "76c9ea0a1e572938226b2d3f619d6f58426f90b5be8bff0347ab51567df11c32"
+  }
+}
