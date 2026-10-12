@@ -39,11 +39,11 @@ _require_finite = partial(require_finite, label="ReNoise")
 
 @dataclass(frozen=True, slots=True)
 class _ReNoiseSettings:
-    num_renoise_steps: int = 9
-    max_num_renoise_steps_first_step: int = 5
+    num_renoise_steps: int = 1
+    max_num_renoise_steps_first_step: int = 1
     average_latent_estimations: bool = True
-    average_first_step_range: tuple[int, int] = (0, 5)
-    average_step_range: tuple[int, int] = (8, 10)
+    average_first_step_range: tuple[int, int] = (0, 2)
+    average_step_range: tuple[int, int] = (1, 2)
 
     @classmethod
     def load(cls, path: Path) -> _ReNoiseSettings:

@@ -7,8 +7,8 @@ All bundled inversions require eta zero and use deterministic VAE posterior mode
 The dataset mask is reserved for metrics and does not constrain editing.
 
 The defaults in the tables below are **implementation defaults for omitted keys**.
-The checked-in ReNoise YAML instead uses one refinement, a cap of one, and windows
-`[0, 2]` / `[1, 2]`. The checked-in inversion/editing batch sizes are **8/32**.
+The checked-in ReNoise YAML uses these same defaults. The checked-in
+inversion/editing batch sizes are **16/64**.
 Refresh entry-point metadata with `uv sync` after changing an installation.
 
 ## Baseline DDIM inversion
@@ -175,11 +175,11 @@ and omitted keys use these defaults:
 
 | Hyperparameter | Default | Meaning |
 | --- | --- | --- |
-| `num_renoise_steps` | `9` | Refinements after the initial prediction; nonnegative integer |
-| `max_num_renoise_steps_first_step` | `5` | Refinement cap for every timestep below 250; nonnegative integer |
+| `num_renoise_steps` | `1` | Refinements after the initial prediction; nonnegative integer |
+| `max_num_renoise_steps_first_step` | `1` | Refinement cap for every timestep below 250; nonnegative integer |
 | `average_latent_estimations` | `true` | Use the average of predictions in the selected window; boolean |
-| `average_first_step_range` | `[0, 5]` | Prediction averaging window for timesteps below 250 |
-| `average_step_range` | `[8, 10]` | Prediction averaging window for timesteps at or above 250 |
+| `average_first_step_range` | `[0, 2]` | Prediction averaging window for timesteps below 250 |
+| `average_step_range` | `[1, 2]` | Prediction averaging window for timesteps at or above 250 |
 
 Averaging windows use zero-based prediction indices, including the initial
 prediction at index 0, with an exclusive end. Each window must satisfy
@@ -187,8 +187,9 @@ prediction at index 0, with an exclusive end. Each window must satisfy
 Reduce the windows as well when reducing the iteration counts. Averaging runs
 predictions only through the selected window's exclusive end; later predictions
 cannot contribute to its result. With the default averaging settings, each
-timestep below 250 makes 5 UNet calls and each later timestep makes 10. Disabling
-averaging uses the last estimate and runs all refinements (6/10 default calls).
+timestep makes 2 UNet calls: timesteps below 250 average both predictions, while
+later timesteps use only the second prediction. Disabling averaging uses the last
+estimate and runs all refinements (2 default calls per timestep).
 These settings are independent of the shared experiment YAML.
 
 ```powershell
