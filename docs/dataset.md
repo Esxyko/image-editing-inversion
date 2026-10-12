@@ -134,8 +134,9 @@ identities; artifact publication preserves existing records from other sources.
 The top-level `dataset` field in `sweep.json` records the selector, or `null` for
 an unfiltered invocation. Saved-artifact replay has no source selector.
 
-`experiment --h-params default.yaml --nsamples N` runs every discovered method
-on the first `N` records in dataset order, optionally selecting a source with
+`experiment --h-params default.yaml --nsamples N` defaults to every discovered
+method; repeat `--method` to select specific methods. It runs on the first `N`
+records in dataset order, optionally selecting a source with
 `--dataset` first. Python `run_methods` and `WorkflowRunner.run_methods` accept
 the same limit through the optional `nsamples` keyword. The count must be a
 positive integer; `None` selects all matching records. Counts exceeding the

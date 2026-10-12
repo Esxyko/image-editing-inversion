@@ -177,9 +177,10 @@ sweep every parameter file.
 `edit_artifacts(artifact_id=None)` always sweeps all parameter files.
 
 For a comparison on a dataset prefix, use
-`uv run experiment --h-params default.yaml --nsamples 10`. It automatically
-selects every discovered adapter, accepts no `--method`, and requires one
-parameter file (`ALL` is rejected). The optional `--dataset` filter applies before
+`uv run experiment --h-params default.yaml --nsamples 10`. It defaults to
+every discovered adapter and accepts repeatable `--method` selectors, including
+`ALL`, just like `diffuse`. It requires one parameter file (`--h-params ALL` is
+rejected). The optional `--dataset` filter applies before
 the limit. Python `run_methods` and `WorkflowRunner.run_methods` accept optional
 `nsamples: int | None = None`; positive integers limit processing to the first
 selected records and `None` retains unlimited processing. Invalid counts,

@@ -78,10 +78,13 @@ Compare every discovered method on the first 10 records with one parameter file:
 ```powershell
 uv run experiment --h-params default.yaml --nsamples 10
 uv run experiment --h-params default.yaml --nsamples 10 --dataset magic-brush
+uv run experiment --method ddim --method null-text --h-params default.yaml --nsamples 10
 ```
 
-`experiment` always selects all registered methods and accepts no `--method`
-argument. Both `--h-params` and `--nsamples` are required; `--h-params ALL` is
+`experiment` defaults to all discovered methods. Use the repeatable `--method`
+argument to select methods, or `--method ALL` to explicitly select all methods.
+Selectors use the same ordering and deduplication rules as `diffuse` below.
+Both `--h-params` and `--nsamples` are required; `--h-params ALL` is
 rejected and the sample count must be a positive integer. Source filtering, when
 specified, occurs before taking the first records in dataset order. Every method
 inverts, reconstructs, and edits the same prefix. A count larger than the available

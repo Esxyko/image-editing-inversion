@@ -47,7 +47,12 @@ def _positive_integer(value: str) -> int:
 def build_experiment_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="experiment",
-        description="Compare every inversion method on the first selected records from the project eval split.",
+        description="Compare selected inversion methods on the first selected records from the project eval split.",
+    )
+    parser.add_argument(
+        "--method", action="append", metavar="METHOD|ALL",
+        help="Registered method ID, or ALL for every discovered method; repeatable, duplicates run once. "
+             "Omitted selects every discovered method.",
     )
     parser.add_argument(
         "--h-params", required=True, type=_single_parameter_file, metavar="FILENAME",
@@ -96,7 +101,7 @@ def experiment(argv: Sequence[str] | None = None) -> int:
         from .workflows import run_methods
 
         return run_methods(
-            ["ALL"], pipeline_h_params_file=args.h_params,
+            args.method or ["ALL"], pipeline_h_params_file=args.h_params,
             dataset=args.dataset, nsamples=args.nsamples,
         )
 

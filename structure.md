@@ -121,8 +121,9 @@ Collection readers are scoped to one lookup/edit batch and clone tensors before
 closing their mappings, so Windows group replacement remains possible.
 
 `experiment` requires one pipeline parameter file and a positive `--nsamples`,
-rejects `--h-params ALL`, and invokes the shared workflow with every discovered
-method. `run_methods` and `WorkflowRunner.run_methods` accept optional `dataset`
+rejects `--h-params ALL`, and defaults to every discovered method. Its optional,
+repeatable `--method` selectors use the same expansion as `diffuse`.
+`run_methods` and `WorkflowRunner.run_methods` accept optional `dataset`
 and `nsamples` keywords, validated before session creation. Each method processes
 the same selected UID prefix; selection retains dataset/cache identities and
 publication preserves artifacts outside that prefix. Limited invocations record
