@@ -20,10 +20,20 @@ Configuration and storage locations are fixed relative to `src/`.
 |-- tests/test_direct_source_state.py # CPU original-embedding, native residual and collection compatibility regressions
 |-- pyproject.toml                  # Dependencies, CLI and method entry points
 |-- config.yaml                     # Shared experiment configuration
+|-- scripts/                        # Sequential full-dataset diffuse CLI wrappers
+|   |-- 1.py                        # default, high_steps, low_steps
+|   |-- 2.py                        # high/low_editing_guidance, high_cross_replace
+|   `-- 3.py                        # low_cross_replace, high/low_self_replace
 |-- pipeline_h_params/              # Sampling, editing CFG and attention sweep parameters
 |   |-- default.yaml
+|   |-- high_cross_replace.yaml
 |   |-- high_editing_guidance.yaml  # Editing CFG 10.0; other settings match default
-|   `-- low_editing_guidance.yaml   # Editing CFG 5.0; other settings match default
+|   |-- high_self_replace.yaml
+|   |-- high_steps.yaml
+|   |-- low_cross_replace.yaml
+|   |-- low_editing_guidance.yaml   # Editing CFG 5.0; other settings match default
+|   |-- low_self_replace.yaml
+|   `-- low_steps.yaml
 |-- method_h_params/
 |   |-- DDIM.yaml
 |   |-- Direct.yaml
@@ -83,6 +93,12 @@ Configuration and storage locations are fixed relative to `src/`.
 | `inversion` | Adapter contracts, factories, algorithms, shared component computation | Configuration and artifacts |
 | `generation` | Model runtime, attention control, reconstruction/editing | Configuration, artifacts, denoising contracts |
 | `workflows` | Invocation resources, preflight, scheduling, replay, outputs | All lower-level packages |
+
+Root-level `scripts/1.py`, `2.py`, and `3.py` only orchestrate existing `diffuse`
+CLI invocations. Each processes its fixed parameter group sequentially with every
+registered method and stops on failure or interruption. Script progress logs append
+to `data/output/script-logs/<script-number>.log`; workflow outputs keep their
+existing per-run layout.
 
 Lower-level packages do not import workflows. Inversion's editor/policy types are
 imported only for type checking; algorithms use the editor supplied through

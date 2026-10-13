@@ -161,6 +161,35 @@ command-line order, duplicates run once, and `ALL` expands IDs in sorted order.
 Only uppercase `ALL` is reserved. `--h-params ALL` processes filenames in sorted
 order, completing every selected method for one file before the next.
 
+The three Python scripts in `scripts/` split the nine pipeline configurations
+into fixed groups. Each runs every discovered method on the entire combined eval
+dataset, completing one configuration before starting the next:
+
+| Script | Configuration order |
+| --- | --- |
+| `scripts/1.py` | `default.yaml`, `high_steps.yaml`, `low_steps.yaml` |
+| `scripts/2.py` | `high_editing_guidance.yaml`, `low_editing_guidance.yaml`, `high_cross_replace.yaml` |
+| `scripts/3.py` | `low_cross_replace.yaml`, `high_self_replace.yaml`, `low_self_replace.yaml` |
+
+Run each script separately from the project root, waiting for it to finish before
+starting the next:
+
+```powershell
+uv run python scripts/1.py
+uv run python scripts/2.py
+uv run python scripts/3.py
+```
+
+Scripts locate the project root relative to their own files and invoke
+`uv run diffuse --method ALL --h-params <filename>` there. Diffusion output remains
+visible in the terminal. Each completed configuration is logged immediately to
+the terminal and `data/output/script-logs/<script-number>.log`, with a timestamp,
+filename, progress, and elapsed seconds. Logs use UTF-8 and append on subsequent
+runs. A failed subprocess, launch error, or user interruption is logged and stops
+the current script with a nonzero exit code (130 for user interruption). Rerunning
+a script starts its configuration list again; there is no automatic retry or
+resume.
+
 Use `--dataset pie-bench` or `--dataset magic-brush` to invert, reconstruct,
 and edit only records from that source across every selected method and parameter
 file. Omit it to process the entire combined dataset:
