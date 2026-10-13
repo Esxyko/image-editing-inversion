@@ -80,6 +80,7 @@ Configuration and storage locations are fixed relative to `src/`.
         |-- inversion.py            # Reuse, missing-image inversion, publication
         |-- replay.py, editing.py   # Artifact preparation and editing coordination
         |-- models.py, timing.py, output.py # Records, clocks, manifests, RGB tensor batches
+        |-- archive.py              # Verified run ZIP publication and source removal
         `-- null_text_diagnostic.py # Temporary observing adapter/session and diagnostic JSONL
 ```
 
@@ -178,6 +179,15 @@ the same selected UID prefix; selection retains dataset/cache identities and
 publication preserves artifacts outside that prefix. Limited invocations record
 their requested `nsamples` in the schema-v2 sweep manifest; unlimited runs omit it.
 
+`workflows.compress_run(run_id)` is a separate Python API backed by the internal
+`RunArchiver`. It uses only standard-library archive/file operations and fixed
+project paths, without creating a workflow session or loading dataset/model
+resources. It accepts one inactive run with manifest status `ok` or `error`,
+verifies a streaming ZIP and an unchanged source snapshot, atomically replaces
+the sibling ZIP, then revalidates and deletes the source. Publication failures
+preserve the source and old ZIP; deletion failures retain the new ZIP and report
+its path. Callers must exclude concurrent writers.
+
 ## Fixed storage layout
 
 ```text
@@ -191,13 +201,15 @@ data/                               # New generated files ignored; tracked histo
 |   `-- <method>/steps-N_guidance-G/
 |       |-- h-params.json
 |       `-- artifacts.safetensors   # Schema v1/v2, ordered IDs and production metadata
-`-- output/<run-id>/
-    |-- sweep.json                  # Schema v2
-    `-- <parameter-file>/<method>/
-        |-- resolved-config.json
-        |-- results.jsonl
-        |-- batches.jsonl           # Schema v2 batch records
-        `-- tensors/batch-<edit_batch_id>.safetensors # RGB output schema v1
+`-- output/
+    |-- <run-id>.zip                # Explicitly archived run; original directory removed
+    `-- <run-id>/
+        |-- sweep.json              # Schema v2
+        `-- <parameter-file>/<method>/
+            |-- resolved-config.json
+            |-- results.jsonl
+            |-- batches.jsonl       # Schema v2 batch records
+            `-- tensors/batch-<edit_batch_id>.safetensors # RGB output schema v1
 ```
 
 Group publication assumes one writer and keeps tensor memory bounded by batches.

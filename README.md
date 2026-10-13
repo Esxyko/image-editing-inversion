@@ -283,6 +283,33 @@ Unverifiable existing groups are preserved and block replacement; legacy replay
 requires a matching catalog checksum. Use `batches.jsonl` for aggregate timing:
 per-image batch durations repeat and must not be summed across members.
 
+## Compress a finished run
+
+Use the Python API with one directory name under `data/output/`:
+
+```python
+from image_editing_inversion.workflows import compress_run
+
+archive_path = compress_run("20261013T080000Z-01234567")  # Replace with an existing run ID.
+# After run_methods() or edit_artifacts() returns, use compress_run(run_dir.name).
+print(archive_path)
+```
+
+The API writes `data/output/<run-id>.zip` and returns its absolute path. It
+preserves the `<run-id>/` top-level directory, all files (including hidden files),
+and empty directories. It uses DEFLATE level 6 and ZIP64, streaming one file at a
+time. Only runs whose `sweep.json` status is `ok` or `error` are accepted. Pass a
+directory name, not a path; links, junctions, and special files are rejected.
+
+After checking member names, sizes, and all CRCs, it atomically replaces any
+existing same-name ZIP and deletes the original run directory. Failures before
+publication preserve the source and the old ZIP. If deletion fails, the verified
+ZIP remains and the exception reports its path; the source directory may have
+been partially deleted. Ensure the run is inactive and no other process modifies
+the run or ZIP during this call; change detection does not provide a writer lock.
+There is no compression CLI or HTTP endpoint. See the
+[archive storage contract](docs/artifacts.md#run-archives).
+
 ## References
 
 - [Dataset schema and provenance](docs/dataset.md)

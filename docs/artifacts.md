@@ -265,8 +265,8 @@ batch files are never overwritten. New result records have no
 `reconstructed_image` or `edited_image` fields. Historical PNG files and records
 remain unchanged; consumers of new outputs must use the tensor references.
 
-There is no PNG compression or whole-run aggregation. Memory stays bounded by
-the editing batch, and a tail batch stores its actual sample count. Two 512x512
+Generation performs no PNG compression or whole-run aggregation. Memory stays
+bounded by the editing batch, and a tail batch stores its actual sample count. Two 512x512
 RGB results use 1.5 MiB per sample, about 8.2 GiB for 1,400 samples across four methods.
 
 Read one sample without materializing the entire output batch:
@@ -291,6 +291,43 @@ with safe_open(str(method_dir / row["tensor_file"]), framework="pt", device="cpu
 edited_hwc = edited_chw.permute(1, 2, 0).contiguous()  # RGB uint8 [H, W, 3]
 edited_float = edited_chw.float() / 255.0            # RGB float32 [3, H, W] in [0, 1]
 ```
+
+## Run archives
+
+`workflows.compress_run(run_id: str) -> Path` archives one inactive run under the
+fixed `data/output/` root. It accepts only a directory name and requires a valid
+`sweep.json` with top-level status `ok` or `error`; missing, invalid, pending, and
+running manifests are rejected. The source must be a direct child of output,
+with only regular files and directories. Symbolic links, directory junctions,
+and special files are rejected before writing.
+
+The sibling `data/output/<run-id>.zip` contains the `<run-id>/` root and all
+contents, including hidden files and empty directories. DEFLATE level 6 and
+ZIP64 support are enabled; file data is streamed rather than loaded as tensors.
+The archive contains outputs only, not the separate dataset, inversion artifacts,
+or intermediate caches. Extract it before using the ordinary tensor-loading
+examples and result records' relative paths.
+
+Compression writes a unique hidden temporary file beside the run. Once closed,
+the archive is checked for the exact member list, uncompressed sizes, directory
+types, and every member's CRC. Source snapshots include names, file sizes,
+modification/change times, and filesystem identities; changes abort publication.
+The verified temporary file atomically replaces any existing sibling ZIP. An
+existing destination must be a regular file, not a link, junction, or directory.
+Before publication, failures preserve the source and any old ZIP and attempt to
+remove the temporary file; cleanup errors are attached to the original exception.
+
+After publication, source containment and the snapshot are checked again before
+recursive deletion. The API returns the absolute ZIP path only after deletion
+succeeds. If that final check or deletion fails, the new verified ZIP remains;
+the exception identifies its path and warns that source deletion may be partial.
+User interruption during cleanup carries the same information as an exception
+note. A process termination may leave a temporary file or a partly removed
+source, depending on the stage reached.
+
+Callers must ensure there are no concurrent writers to the run or its ZIP. A
+terminal manifest and snapshot checks are not a cross-process lock. Archiving is
+explicit and does not run automatically after generation or replay.
 
 ## Temporary Null-text diagnostics
 
