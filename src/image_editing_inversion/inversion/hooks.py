@@ -28,6 +28,11 @@ class DenoisingStepState:
 class DenoisingHook:
     """Optional method-specific changes around each shared denoising step."""
 
+    @property
+    def reconstruction_guidance_scale(self) -> float | None:
+        """Optional source CFG calibrated by this hook; None uses editing CFG."""
+        return None
+
     def before_step(
         self, step_index: int, timestep: int, state: DenoisingStepState
     ) -> DenoisingStepState:

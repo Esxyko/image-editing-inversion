@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import torch
 
 from ...artifacts import InversionArtifact
 from ...config import ExperimentConfig
+from ...config.method_parameters import MethodGuidanceSettings
 from ..base import InversionMethod
 from ..context import InversionContext
 from ..components import prepare_sources
 from ..validation import inverse_scheduler as _inverse_scheduler, validate_sampling
 from .common import build_artifact, model_execution
+from .source_embeddings import (
+    SOURCE_EMBEDDING_VERSION, reject_trajectory_overwrite, replay_source_embeddings,
+    source_embedding_state, validate_source_embeddings,
+)
 
 
 if TYPE_CHECKING:
@@ -22,12 +28,30 @@ if TYPE_CHECKING:
 class DDIMInversion(InversionMethod):
     """Invert source batches with the run's DDIM schedule and guidance."""
 
+    def __init__(self) -> None:
+        self._settings: MethodGuidanceSettings | None = None
+
+    def method_h_params(self, config: ExperimentConfig) -> Mapping[str, Any]:
+        if self._settings is None:
+            self._settings = MethodGuidanceSettings.load(config.project.method_h_params / "DDIM.yaml")
+        return asdict(self._settings)
+
     @property
     def method_id(self) -> str:
         return "ddim"
 
     def inversion_cache_parameters(self, context: InversionContext) -> Mapping[str, Any]:
-        return {}
+        return {"source_embedding_version": SOURCE_EMBEDDING_VERSION}
+
+    def validate_replay(self, artifact: InversionArtifact, context: InversionContext) -> None:
+        reject_trajectory_overwrite(artifact, "DDIM")
+        if artifact.per_step_state:
+            raise ValueError("DDIM artifacts do not use per-step state")
+        validate_source_embeddings(artifact, "DDIM", context)
+
+    def replay_source_embeddings(self, artifacts: Sequence[InversionArtifact],
+                                 context: InversionContext) -> tuple[torch.Tensor, torch.Tensor] | None:
+        return replay_source_embeddings(artifacts, "DDIM", context)
 
     def validate_inversion_config(self, config: ExperimentConfig) -> None:
         validate_sampling(config, "DDIM")
@@ -71,7 +95,7 @@ class DDIMInversion(InversionMethod):
                     model_input, timestep, encoder_hidden_states=embeddings
                 ).sample
                 unconditional, conditional = prediction.chunk(2)
-                guided = unconditional + config.sampling.guidance_scale * (
+                guided = unconditional + config.inversion_guidance_scale * (
                     conditional - unconditional
                 )
                 latents = inverse_scheduler.step(
@@ -81,9 +105,11 @@ class DDIMInversion(InversionMethod):
             if not torch.isfinite(latents).all().item():
                 raise ValueError("DDIM inversion produced a non-finite terminal latent")
             terminal = latents.detach().to(device="cpu")
+            encodings = source_embedding_state(embeddings)
             artifacts: list[InversionArtifact] = []
             for index, uid in enumerate(uids):
-                artifact = build_artifact(self.method_id, context, uid, terminal[index:index + 1])
+                artifact = build_artifact(self.method_id, context, uid, terminal[index:index + 1],
+                                          static_state=encodings[index])
                 editor.validate_artifact(artifact)
                 artifacts.append(artifact)
             return artifacts

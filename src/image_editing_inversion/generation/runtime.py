@@ -19,6 +19,7 @@ class ModelRuntime:
     """Own pipeline loading, accelerator selection, and memory settings."""
 
     def __init__(self, config: ExperimentConfig) -> None:
+        config.require_method_h_params()
         config.validate_hardware()
         self.config = config
         self.device = torch.device(config.runtime.device)
@@ -162,6 +163,7 @@ class ModelRuntime:
 
     def reconfigure(self, config: ExperimentConfig) -> None:
         """Change sampling/edit settings while retaining the loaded model."""
+        config.require_method_h_params()
         if config.model != self.config.model or config.runtime != self.config.runtime:
             raise ValueError("A shared model runtime cannot change model or runtime settings")
         self.pipeline.maybe_free_model_hooks()

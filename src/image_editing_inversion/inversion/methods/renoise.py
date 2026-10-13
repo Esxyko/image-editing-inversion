@@ -16,6 +16,7 @@ import yaml
 
 from ...artifacts import InversionArtifact
 from ...config import ConfigError, ExperimentConfig
+from ...config.method_parameters import MethodGuidanceSettings
 from ..base import InversionMethod
 from ..context import InversionContext
 from ..components import prepare_sources
@@ -28,6 +29,10 @@ from .common import (
     require_finite, validate_ddim_scheduler,
     validate_guidance_compatibility, validate_guidance_state,
 )
+from .source_embeddings import (
+    SOURCE_EMBEDDING_VERSION, reject_trajectory_overwrite, replay_source_embeddings,
+    source_embedding_state, validate_source_embeddings,
+)
 
 
 _SETTINGS_FILENAME = "ReNoise.yaml"
@@ -38,7 +43,7 @@ _require_finite = partial(require_finite, label="ReNoise")
 
 
 @dataclass(frozen=True, slots=True)
-class _ReNoiseSettings:
+class _ReNoiseSettings(MethodGuidanceSettings):
     num_renoise_steps: int = 1
     max_num_renoise_steps_first_step: int = 1
     average_latent_estimations: bool = True
@@ -95,7 +100,8 @@ class _ReNoiseSettings:
                     f"0 <= start < end <= {budget} (exclusive end)"
                 )
             ranges[name] = (value[0], value[1])
-        return cls(**counts, average_latent_estimations=averaging, **ranges)
+        guidance = MethodGuidanceSettings.from_mapping(values)
+        return cls(**counts, average_latent_estimations=averaging, **ranges, **asdict(guidance))
 
     def for_timestep(self, timestep: int) -> tuple[int, tuple[int, int]]:
         if timestep < _LOW_TIMESTEP_BOUNDARY:
@@ -111,6 +117,8 @@ _validate_scheduler = partial(validate_ddim_scheduler, label="ReNoise")
 
 def _artifact_state(artifact: InversionArtifact) -> float:
     """Validate replay state without loading settings, Diffusers, or a runtime."""
+    reject_trajectory_overwrite(artifact, "ReNoise")
+    validate_source_embeddings(artifact, "ReNoise")
     if artifact.method_id != "renoise":
         raise ValueError("ReNoise replay requires a renoise artifact")
     if artifact.scheduler_id != "ddim" or artifact.eta != 0:
@@ -150,8 +158,9 @@ class _ReNoiseBatchHook(_ArtifactBatchHook):
 
     def __init__(self, artifacts: Sequence[InversionArtifact]) -> None:
         super().__init__(artifacts, "ReNoise")
-        for artifact in artifacts:
-            _artifact_state(artifact)
+        scales = [_artifact_state(artifact) for artifact in artifacts]
+        if any(scale != scales[0] for scale in scales):
+            raise ValueError("ReNoise batch artifacts must share inversion guidance")
 
     def before_step(
         self, step_index: int, timestep: int, state: DenoisingStepState,
@@ -187,7 +196,7 @@ class ReNoiseInversion(InversionMethod):
             refinements, (start, end) = settings.for_timestep(timestep)
             selected = [start, end] if settings.average_latent_estimations else [refinements, refinements + 1]
             schedule.append({"prediction_range": selected})
-        return {"prediction_schedule": schedule}
+        return {"prediction_schedule": schedule, "source_embedding_version": SOURCE_EMBEDDING_VERSION}
 
     def validate_inversion_config(self, config: ExperimentConfig) -> None:
         validate_sampling(config, "ReNoise")
@@ -220,6 +229,7 @@ class ReNoiseInversion(InversionMethod):
         self, artifact: InversionArtifact, context: InversionContext
     ) -> None:
         guidance_scale = _artifact_state(artifact)
+        validate_source_embeddings(artifact, "ReNoise", context)
         artifact.validate_compatibility(
             context.config,
             dataset_ref=context.dataset_ref,
@@ -229,6 +239,10 @@ class ReNoiseInversion(InversionMethod):
         )
         validate_guidance_compatibility(guidance_scale, context, "ReNoise")
         self._validate_context(context)
+
+    def replay_source_embeddings(self, artifacts: Sequence[InversionArtifact],
+                                 context: InversionContext) -> tuple[torch.Tensor, torch.Tensor] | None:
+        return replay_source_embeddings(artifacts, "ReNoise", context)
 
     def create_denoising_hook(self, artifact: InversionArtifact) -> DenoisingHook:
         return _ReNoiseHook(artifact)
@@ -313,7 +327,7 @@ class ReNoiseInversion(InversionMethod):
                 model_input, timestep, encoder_hidden_states=embeddings
             ).sample
             unconditional, conditional = prediction.chunk(2)
-            guided = unconditional + context.config.sampling.guidance_scale * (
+            guided = unconditional + context.config.inversion_guidance_scale * (
                 conditional - unconditional
             )
             _require_finite(guided, "guided noise prediction")
@@ -358,11 +372,12 @@ class ReNoiseInversion(InversionMethod):
                     latent, timestep, a, b, embeddings, settings, context
                 )
             terminal = latent.detach().to(device="cpu")
+            encodings = source_embedding_state(embeddings)
             artifacts: list[InversionArtifact] = []
             for index, uid in enumerate(uids):
                 artifact = build_artifact(self.method_id, context, uid, terminal[index:index + 1], {
                     _GUIDANCE_KEY: guidance_state(context),
-                })
+                }, static_state=encodings[index])
                 self.validate_replay(artifact, context)
                 artifacts.append(artifact)
             return artifacts

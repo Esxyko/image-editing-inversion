@@ -1,5 +1,8 @@
-# Loaded from the fixed project root on the adapter's first inversion preflight or call.
+# Loaded once per invocation for inversion and artifact replay.
 # These settings are independent of the shared experiment YAML.
+# Pivots use inversion CFG; optimization, reconstruction and editing use editing CFG.
+inversion_guidance_scale: 1.25
+editing_guidance_scale: 7.5
 num_inner_steps: 10
 learning_rate: 0.01
 early_stop_epsilon: 0.00001

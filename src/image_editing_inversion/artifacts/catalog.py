@@ -138,7 +138,7 @@ class ArtifactCatalog:
             temporary.unlink(missing_ok=True)
 
     def _collection(self, path: Path) -> ArtifactCollection | None:
-        """Check a group checksum once per unchanged file, then read lazily."""
+        """Verify a merge base once; embedded checksums tolerate a lagging catalog."""
         relative = path.relative_to(self.root).as_posix()
         expected = self._groups.get(relative, {}).get("checksum")
         try:
@@ -147,8 +147,8 @@ class ArtifactCatalog:
             checked = self._checked.get(path)
             if checked is not None and checked[0] == identity:
                 return checked[1]
-            collection = (None if expected is not None and _file_digest(path) != expected
-                          else ArtifactCollection(path))
+            collection = ArtifactCollection(path)
+            collection.validate_integrity(expected_checksum=expected)
             self._checked[path] = (identity, collection)
             return collection
         except (OSError, ValueError, TypeError, KeyError):
@@ -181,7 +181,9 @@ class ArtifactCatalog:
             reference = ArtifactReference(path, entry["index"], entry["sample_uid"])
             artifact = batch.load(collection, reference)
             if (artifact.provenance is None
-                    or artifact.provenance.method_parameters != normalized.get("method_parameters")):
+                    or artifact.provenance.method_parameters != normalized.get("method_parameters")
+                    or artifact.provenance.method_h_params is None
+                    or artifact.provenance.method_h_params != normalized.get("method_h_params")):
                 return None
             return artifact, reference
         except (OSError, ValueError, TypeError, KeyError):
@@ -218,6 +220,17 @@ class ArtifactGroupPublication:
         self.parameters = pipeline_group_parameters(group_name)
         self.path = catalog._artifact_path(f"{self.method_id}/{group_name}/{ArtifactCollection.filename}")
         self._base = catalog._collection(self.path)
+        if self._base is None:
+            try:
+                self.path.stat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise ValueError(
+                    f"Cannot verify the existing artifact group at {self.path}; refusing to "
+                    "overwrite it and discard unselected records. Repair or restore the group "
+                    "before retrying. The original file has been preserved."
+                )
         self._sources: dict[str, ArtifactReference] = {} if self._base is None else {
             reference.sample_uid: reference for reference in self._base.references
         }
@@ -273,11 +286,22 @@ class ArtifactGroupPublication:
             ):
                 raise ValueError("Cache inputs must match the artifact's sample UID and method")
             if isinstance(artifact, InversionArtifact):
+                if cache_inputs is not None and (
+                    artifact.provenance is None
+                    or artifact.provenance.method_h_params is None
+                    or artifact.provenance.method_h_params != cache_inputs.get("method_h_params")
+                    or artifact.provenance.method_parameters != cache_inputs.get("method_parameters")
+                ):
+                    raise ValueError("Artifact production parameters must match its cache inputs")
                 if artifact.method_id != self.method_id or len(artifact.timesteps) != self.parameters["num_inference_steps"]:
                     raise ValueError("Artifact method and steps must match its group")
                 if (artifact.provenance is not None and artifact.provenance.guidance_scale is not None
                         and artifact.provenance.guidance_scale != self.parameters["guidance_scale"]):
                     raise ValueError("Artifact production guidance must match its group")
+                if (artifact.provenance is not None and artifact.provenance.method_h_params is not None
+                        and artifact.provenance.method_h_params["inversion_guidance_scale"]
+                        != self.parameters["guidance_scale"]):
+                    raise ValueError("Artifact method inversion guidance must match its group")
                 fresh.append(artifact)
             elif not isinstance(artifact, ArtifactReference) or self._sources.get(uid) != artifact:
                 raise ValueError("Reused artifact reference must belong to the current published group")
@@ -317,7 +341,7 @@ class ArtifactGroupPublication:
                 staged_descriptor.replace(descriptor)
             combined.replace(self.path)
         else:
-            checksum = self.catalog._groups.get(relative, {}).get("checksum") or _file_digest(self.path)
+            checksum = _file_digest(self.path)
         references = tuple(ArtifactReference(self.path, index, uid) for index, uid in enumerate(self._sources))
         entries = {key: entry for key, entry in self.catalog._entries.items() if entry["artifact"] != relative}
         for reference in references:

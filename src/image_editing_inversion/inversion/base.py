@@ -12,6 +12,7 @@ from .context import InversionContext
 from .hooks import BatchedDenoisingHook, DenoisingHook
 
 if TYPE_CHECKING:
+    import torch
     from ..config import ExperimentConfig
     from ..generation import PromptToPrompt
 
@@ -50,6 +51,7 @@ class InversionMethod(ABC):
         self, samples: Sequence[Mapping[str, Any]], context: InversionContext
     ) -> tuple[list[str], list[str], list[Image.Image]]:
         """Validate shared source inputs before any model calls."""
+        context.config.require_method_h_params()
         if not 1 <= len(samples) <= context.config.runtime.inversion_batch_size:
             raise ValueError(
                 f"{self.method_id} inversion requires 1 to "
@@ -81,11 +83,10 @@ class InversionMethod(ABC):
     def method_h_params(self, config: ExperimentConfig) -> Mapping[str, Any]:
         """Return resolved, JSON-compatible method hyperparameters for run snapshots.
 
-        Include defaults and reuse the settings loaded for inversion. The default
-        describes a method without separate hyperparameters. Replay does not call
-        this method.
+        Include defaults and reuse the settings loaded for inversion and replay.
+        Every method exposes separate inversion and target-editing CFG values.
         """
-        return {}
+        return {"inversion_guidance_scale": 7.5, "editing_guidance_scale": 7.5}
 
     def validate_inversion_context(self, context: InversionContext) -> None:
         """Optionally validate the actual scheduler before processing any samples."""
@@ -101,7 +102,7 @@ class InversionMethod(ABC):
         """Opt into reuse with effective inversion settings; None disables caching.
 
         Include any extra inputs affecting inversion, including the seed for
-        stochastic methods. Shared model/scheduler/guidance inputs are supplied
+        stochastic methods. Shared model/scheduler and complete method inputs are supplied
         by the runner. Replay does not call this method.
         """
         return None
@@ -115,6 +116,12 @@ class InversionMethod(ABC):
     def result_metadata(self, artifact: InversionArtifact) -> Mapping[str, Any]:
         """Return JSON-compatible method diagnostics from saved inversion state."""
         return {}
+
+    def replay_source_embeddings(
+        self, artifacts: Sequence[InversionArtifact], context: InversionContext,
+    ) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Optionally supply exact source conditional/unconditional tensors."""
+        return None
 
     def create_batch_denoising_hook(
         self, artifacts: Sequence[InversionArtifact],

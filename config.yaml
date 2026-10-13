@@ -21,8 +21,8 @@ runtime:
   # Increased batches for a 32 GB VRAM GPU with headroom at 512x512.
   device: cuda
   dtype: float16
-  batch_size: 64 # Source/target pairs per editing batch.
-  inversion_batch_size: 16 # Source images per inversion batch; tune against Null-text peak memory.
+  batch_size: 4 # Source/target pairs per editing batch.
+  inversion_batch_size: 8 # Source images per inversion batch; tune against Null-text peak memory.
   attention_query_chunk_size: 4096
   cpu_offload: none # "none", "model", or "sequential"
   vae_slicing: true

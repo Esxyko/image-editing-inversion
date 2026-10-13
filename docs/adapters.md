@@ -20,20 +20,37 @@ optional `validate_inversion_context(context)` checks the actual scheduler befor
 samples are processed. Both default to no-ops for existing external adapters.
 Implement them to participate fully in whole-sweep preflight, and reuse the same
 checks in direct inversion calls. All bundled adapters do so. Replay invokes
-neither method, so inversion-only restrictions and hyperparameter files do not
-affect `edit_artifacts`.
+neither validation method, so inversion-only runtime restrictions do not affect
+`edit_artifacts`. It does load method hyperparameters to check saved provenance.
 Override the optional `validate_replay(artifact, context)` to check method-specific
 state or configuration before the runner creates that hook; the default does
 nothing. Direct editor callers should invoke this validation themselves before
 creating a method's hook.
 
 Override `method_h_params(config)` to expose resolved method hyperparameters in
-each inversion run's `resolved-config.json`. Return a JSON-compatible mapping
-that includes defaults and uses the same loaded settings as inversion. The default
-returns `{}` for methods without separate hyperparameters. The workflow captures
-this snapshot after configuration preflight; explicit replay does not call it.
-This reporting hook does not affect cache identity, which remains controlled by
-`inversion_cache_parameters(context)`.
+each inversion and replay run's `resolved-config.json`. Return a JSON-compatible
+mapping with all defaults, `inversion_guidance_scale`, and `editing_guidance_scale`.
+The default returns both CFG values as `7.5`. Load settings once per adapter
+invocation and use the same settings for inversion and replay. The workflow binds
+the normalized snapshot into `ExperimentConfig.method_h_params` before preflight
+or model execution. The complete snapshot participates in cache identity and
+replay compatibility in addition to `inversion_cache_parameters(context)`.
+
+`SamplingConfig` no longer contains `guidance_scale`. Algorithms use
+`config.inversion_guidance_scale`; the shared editor applies that CFG to all source
+branches and `config.editing_guidance_scale` to all target branches. Direct callers
+must bind configuration before creating an editor, for example:
+
+```python
+from dataclasses import replace
+
+config = replace(config, method_h_params=dict(method.method_h_params(config)))
+```
+
+Adapters supplying their own provenance must include the complete bound
+`method_h_params` snapshot. Missing snapshots or any differing hyperparameter
+prevent reuse and replay. The runner attaches provenance when the adapter leaves
+it unset; `method_parameters` continues to describe effective algorithm inputs.
 
 Adapters can override `invert_batch(samples, context)` to perform batched model
 calls and must return one artifact per input, in input order. The workflow supplies
@@ -55,7 +72,11 @@ The default returns `None`, so artifacts are saved centrally without automatic
 reuse. All four bundled adapters opt in; Null-text and ReNoise expose the same
 resolved settings used by inversion. Explicit replay does not call this method.
 Hooks receive source/target latents and text embeddings before and after each
-denoising step. Optional batch hooks are described below. Install the method through the
+denoising step. A hook may expose `reconstruction_guidance_scale` as a finite
+nonnegative float to use its calibrated CFG for the source branch. The default
+is `None`, using editing CFG. Batched hooks supply one value for the batch;
+pair hooks supply one per source. Null-text uses its saved optimization CFG;
+ReNoise uses the default editing CFG. Optional batch hooks are described below. Install the method through the
 `image_editing_inversion.methods` Python entry-point group. Contracts are exported from `image_editing_inversion.inversion`; bundled
 implementations live under `image_editing_inversion.inversion.methods`.
 Published inversion implementations can then be adapted without changing the
@@ -66,6 +87,19 @@ method diagnostics in sample result records after successful preparation,
 including editing errors. The default returns an empty mapping. Derive diagnostics
 from saved artifact state so cache hits and replay retain the original values.
 Shared result fields take precedence over method diagnostics.
+
+Adapters may store per-image tensors in `artifact.static_state`, which uses
+collection schema v2 and is serialized separately from `per_step_state`.
+Static state is opaque to the shared editor and has no timestep dimension requirement.
+Existing schema-v1 collections and adapters remain supported; legacy collections
+without embedded checksums need a matching catalog-v2 checksum for replay or merging.
+The optional
+`replay_source_embeddings(artifacts, context)` hook returns source conditional
+and unconditional tensors in artifact order, or `None` for ordinary joint text
+encoding. Workflows pass them as `source_prompt_embeddings` and
+`source_negative_prompt_embeddings` to `Editor.edit_batch`. Both tensors must have
+shape `[N, model_max_length, text_hidden_size]`, the model dtype, and finite values.
+The editor then encodes target captions only. The default hook returns `None`.
 
 ## Batched denoising hooks
 
@@ -105,6 +139,17 @@ every subclass retains the original pair callbacks. The default cross-attention
 path limits pair-count times query-chunk-length to `attention_query_chunk_size`,
 using at most four pairs together. Execution changes may introduce small
 floating-point differences without changing attention policy or cache identity.
+
+During active attention control, the original processor supplies both
+unconditional branches and the conditional source branch, including its output
+projection and residual handling. Explicit source probabilities are used only
+to transfer attention to the conditional target branch. This also applies to
+policy subclasses, so enabling P2P does not switch the source reconstruction to
+a different attention implementation. Active layers reuse the native Q/K/V
+projections through observers scoped to that native call, avoiding repeated input
+normalization and projection. Target attention transfer and its output projection
+remain additional work; the native batch shape stays unchanged. Existing
+inversion artifacts remain reusable.
 
 For example, a subclass can blend mapped source attention with the target's
 original attention:
@@ -204,12 +249,16 @@ hyperparameters. Each `get_method` call constructs a fresh adapter and verifies
 its ID. Each workflow invocation retains one adapter per method, shared by its
 preflight, inversion, and replay stages across parameter files. Factories must
 return fresh instances; mutable state must not be shared between invocations.
-Replay does not load inversion-only hyperparameters.
+Replay loads the complete method parameters for provenance matching without
+performing inversion or optimization.
 
 ## Migration
 
 | Previous usage | Current usage |
 | --- | --- |
+| Pipeline `sampling.guidance_scale` | Per-method `inversion_guidance_scale` and `editing_guidance_scale` |
+| `SamplingConfig.guidance_scale` | Bound `ExperimentConfig.method_h_params` and CFG accessors |
+| Provenance without complete method parameters | Regenerate with the full `method_h_params` snapshot for reuse/replay |
 | `register_method(YourMethod())` | `register_method("your-method-id", YourMethod)` |
 | Entry point exporting an adapter instance | Export a zero-argument class or factory |
 | `get_method` returning a shared instance | Fresh instance on every call |
@@ -220,12 +269,17 @@ Replay does not load inversion-only hyperparameters.
 | `EditResult.reconstructed` / `.edited` as PIL images | Contiguous CPU `torch.uint8` RGB tensors shaped `[3, height, width]` |
 | `reconstructed_image` / `edited_image` in new result records | Relative `tensor_file` plus zero-based `tensor_index` into both RGB tensors |
 | Batch timing schema v1 with `image_write` | Schema v2 with `tensor_write`; other duration meanings are retained |
+| Withdrawn artifacts with `source_latents` or `direct_source_latents` | Regenerate native-method artifacts; forced source-trajectory replacement has been removed |
+| Collection readers requiring exactly four metadata keys | Accept the additive `checksums` field; new files verify metadata and every tensor |
+| Legacy collections without embedded checksums | Keep their matching catalog-v2 checksum; unverifiable files cannot be replayed or merged |
 
 `WorkflowRunner` can be reused: each call creates a new session, reloads the
 configuration snapshot, and constructs fresh adapters and a model runtime.
-Existing inversion and pair-hook signatures, the entry-point group, inversion
-tensor layouts, cache identities, and inversion storage schemas remain unchanged.
-The optional batch-hook API is additive. Editing result types and output timing
+Existing inversion and pair-hook signatures and the entry-point group remain
+unchanged. Static artifact state and source-embedding replay are additive APIs;
+collections without static state retain v1. `source_embedding_version: 1` replaces
+the withdrawn overwrite cache version, and
+pivot reuse now binds actual input-tensor checksums. Editing result types and output timing
 records migrate as shown above; historical PNG files and records remain intact.
 Standalone editors can call `editor.close()` to release their runtime; workflow
 sessions close their runtime and reusable reader thread pool automatically.

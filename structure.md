@@ -14,11 +14,16 @@ Configuration and storage locations are fixed relative to `src/`.
 |   |-- dataset.md                  # Schema, provenance, loading, identity
 |   |-- methods.md                  # Algorithms, restrictions, hyperparameters
 |   |-- artifacts.md                # Storage, caches, replay, timing
+|   |-- direct-reconstruction-tests.md # Direct GPU diagnostic controls and comparisons
 |   `-- adapters.md                 # Extension contracts and API migration
+|-- tests/test_direct_reconstruction.py # Opt-in Direct GPU integration tests/probes
+|-- tests/test_direct_source_state.py # CPU original-embedding, native residual and collection compatibility regressions
 |-- pyproject.toml                  # Dependencies, CLI and method entry points
 |-- config.yaml                     # Shared experiment configuration
 |-- pipeline_h_params/default.yaml  # Sampling and attention sweep parameters
 |-- method_h_params/
+|   |-- DDIM.yaml
+|   |-- Direct.yaml
 |   |-- Null_text.yaml
 |   `-- ReNoise.yaml
 |-- .env.example                    # HF_TOKEN template; .env is ignored
@@ -29,6 +34,7 @@ Configuration and storage locations are fixed relative to `src/`.
     |-- config/
     |   |-- models.py               # Validated settings and hardware checks
     |   |-- validation.py           # Shared semantic checks and ConfigError
+    |   |-- method_parameters.py    # Shared inversion/editing CFG defaults and loading
     |   `-- loader.py               # Strict YAML schemas and invocation snapshot
     |-- data/
     |   |-- schema.py, loader.py     # Project eval split contract and loading
@@ -36,7 +42,8 @@ Configuration and storage locations are fixed relative to `src/`.
     |-- artifacts/
     |   |-- inversion.py            # Per-image state and compatibility
     |   |-- layout.py               # Canonical published group parsing
-    |   |-- collection.py           # Indexed schema-v1 safetensors and streaming
+    |   |-- collection.py           # Indexed schema-v1/v2 safetensors and streaming
+    |   |-- integrity.py            # Metadata/payload checksums and legacy catalog verification
     |   |-- catalog.py              # Cache catalog and group publication
     |   `-- repository.py, intermediates.py # Discovery and component storage
     |-- inversion/
@@ -46,6 +53,7 @@ Configuration and storage locations are fixed relative to `src/`.
     |   |-- components.py           # Source encodings, conditional pivots, reuse
     |   `-- methods/
     |       |-- common.py           # Guidance, DDIM checks, artifact building, cleanup
+    |       |-- source_embeddings.py # Captured source encodings, validation and reuse
     |       `-- ddim.py, direct.py, null_text.py, renoise.py
     |-- generation/
     |   |-- runtime.py, identity.py # Pipeline setup and content identity
@@ -96,7 +104,8 @@ but is excluded from serialization and cache matching.
    inversion, validate all configuration/method combinations before loading data.
 3. Load the fixed project dataset. For inversion, filter UIDs by source, then apply
    the optional sample limit in dataset order. Load one model and validate each
-   resolved scheduler. Replay uses saved state without inversion preflight or method parameter files.
+   resolved scheduler. Replay uses saved state without inversion preflight, but loads
+   current method parameter files for strict snapshot matching.
 4. Process parameter files sequentially. For each inversion method, resolve cache
    hits before reading missing samples, stage batches, and publish the complete group.
 5. Read published artifacts in independently sized editing batches; validate, prepare
@@ -110,6 +119,23 @@ state are not shared across calls. Session collaborators receive explicit inputs
 and never import or retain the runner. `ReplayPreparer` uses the session's adapters
 for both fresh inversions and saved artifacts. Stable cache inputs are resolved
 once per method/configuration context and combined with each UID.
+
+Pipeline configuration contains steps and attention fractions, without CFG.
+The session binds each pipeline/method combination to a normalized
+`ExperimentConfig.method_h_params` snapshot before preflight or execution and
+reconfigures the shared editor when switching methods. Source denoising uses
+editing CFG for every bundled method. Null-text hooks request their saved
+optimization CFG, which is validated against editing CFG. Null-text optimization
+and target denoising also use editing CFG. Null-text pivots use inversion CFG;
+Direct conditional pivots retain CFG 1.
+Cache identity version 3 includes all method parameters, including both CFG values.
+Saved provenance carries the same complete snapshot; artifacts without it or with
+different current method parameters cannot be reused or replayed. Group directory
+guidance and per-step `guidance_scale` continue to mean inversion CFG.
+Null-text separately saves `optimization_guidance_scale`, checks it against
+editing CFG on replay, and versions the optimization rule in cache identity.
+It also saves `pivot_guidance_scale`, validates it against inversion CFG, and
+versions the pivot-guidance rule. Older artifacts lacking this state require regeneration.
 
 The session owns one reusable read thread pool and closes it and its model runtime
 on success or failure. Runtime schedule lists and ordinary detached empty-caption
@@ -143,7 +169,7 @@ data/                               # New generated files ignored; tracked histo
 |   |-- catalog.json                # Schema v2
 |   `-- <method>/steps-N_guidance-G/
 |       |-- h-params.json
-|       `-- artifacts.safetensors   # Schema v1, ordered IDs and production metadata
+|       `-- artifacts.safetensors   # Schema v1/v2, ordered IDs and production metadata
 `-- output/<run-id>/
     |-- sweep.json                  # Schema v2
     `-- <parameter-file>/<method>/
@@ -154,8 +180,21 @@ data/                               # New generated files ignored; tracked histo
 ```
 
 Group publication assumes one writer and keeps tensor memory bounded by batches.
-Final artifacts and intermediate components have independent caches. Their schemas,
-cache identities, filenames, UID ordering, and tensor layouts remain unchanged.
+New collections embed metadata and per-tensor checksums. Replay verifies loaded
+tensors; publication verifies the entire existing group before merging, including
+unselected records. Valid embedded checksums permit recovery when catalog publication
+lagged behind the file. Legacy collections require a matching catalog checksum;
+unverifiable existing groups are preserved and block replacement.
+Final artifacts and intermediate components have independent caches. Collection
+schema v2 adds per-image static state while retaining v1 readers and writes for
+methods without static tensors. Filenames, UID ordering and RGB output layouts
+remain unchanged. All bundled methods bind original source embeddings to their
+artifacts and reuse them while retaining native inversion and denoising behavior.
+Direct retains its source-only residual calibration/replay. DDIM, Null-text and
+ReNoise receive no additional latent correction. The forced source-trajectory
+overwrite variant has been withdrawn; its artifacts require regeneration.
+Pivot cache identity includes its CFG and checksums of its actual source
+latent/embedding inputs, including unconditional embeddings for guided pivots.
 New editing outputs store uncompressed CPU uint8 RGB batches; sample records identify
 their relative file and index. Historical PNG outputs remain untouched. See
 [storage contracts](docs/artifacts.md) for compatibility, interruption,

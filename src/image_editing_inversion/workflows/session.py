@@ -6,7 +6,6 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from itertools import groupby
-import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable, Iterator, Mapping, Sequence
 
@@ -71,6 +70,7 @@ class WorkflowSession:
         self._parameter_path: Path | None = None
         self._methods: dict[str, InversionMethod] = {}
         self._method_h_params: dict[tuple[Path, str], Mapping[str, Any]] = {}
+        self._method_configs: dict[tuple[Path, str], ExperimentConfig] = {}
         self._repository: DatasetRepository | None = None
         self._editor: Editor | None = None
         self._replay: ReplayPreparer | None = None
@@ -194,14 +194,7 @@ class WorkflowSession:
         with self._execution(method_ids):
             self._setup(method_ids)
             methods = list(self._methods.values())
-            preflight = SweepPreflight(self._parameter_configs, methods, self._sweep_output)
-            preflight.configuration()
-            self._method_h_params = {
-                (path, method.method_id): json.loads(json.dumps(
-                    dict(method.method_h_params(config)), allow_nan=False,
-                ))
-                for path, config in self._parameter_configs for method in methods
-            }
+            preflight = self._prepare_method_configs(inversion=True)
             self._load_dataset()
             uids = self.repository.select_uids(self._dataset_source)
             if self._nsamples is not None:
@@ -221,8 +214,20 @@ class WorkflowSession:
         method_ids = tuple(dict.fromkeys(reference.group.method_id for reference in references))
         with self._execution(method_ids):
             self._setup(method_ids)
+            self._prepare_method_configs(inversion=False)
             self._load_dataset()
             return self._sweep(lambda: self._edit_artifacts_for_config(references))
+
+    def _prepare_method_configs(self, *, inversion: bool) -> SweepPreflight:
+        preflight = SweepPreflight(
+            self._parameter_configs, list(self._methods.values()), self._sweep_output,
+        )
+        preflight.configuration(inversion=inversion)
+        self._method_configs = dict(preflight.method_configs)
+        self._method_h_params = {
+            key: config.require_method_h_params() for key, config in self._method_configs.items()
+        }
+        return preflight
 
     def _process_edit_references(
         self, references: Sequence[ArtifactReference], *, allow_skip: bool,
@@ -241,7 +246,16 @@ class WorkflowSession:
         self._finished_methods = set()
         self._active_method_id = None
         self._parameter_path = path
-        if self._editor is not None:
+        if self._editor is not None and config.method_h_params is not None:
+            self._editor.reconfigure(config)
+        self.config = config
+
+    def _activate_method(self, method_id: str) -> None:
+        if self._parameter_path is None:
+            raise RuntimeError("No parameter-file run is active")
+        config = self._method_configs[self._parameter_path, method_id]
+        self._active_method_id = method_id
+        if self._editor is not None and self._editor.config != config:
             self._editor.reconfigure(config)
         self.config = config
 
@@ -249,7 +263,7 @@ class WorkflowSession:
         method_id = method_directory_name(method_id)
         if self._parameter_path is None:
             raise RuntimeError("No parameter-file run is active")
-        self._active_method_id = method_id
+        self._activate_method(method_id)
         if method_id not in self._outputs:
             self._sweep_output.update_method(
                 self._parameter_path.name, method_id, "running",
@@ -341,10 +355,10 @@ class WorkflowSession:
     ) -> None:
         if self._coordinator is None:
             raise RuntimeError("The inversion coordinator is not initialized")
-        context = self.inversion_context
-        settings = self.artifact_settings
         for method in methods:
             output = self._output_for(method.method_id)
+            context = self.inversion_context
+            settings = self.artifact_settings
             timings: list[InversionRecord] = []
             with ExitStack() as resources:
                 publication = None

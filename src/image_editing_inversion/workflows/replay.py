@@ -143,6 +143,9 @@ class ReplayPreparer:
     ) -> None:
         self.check_identity(artifact)
         artifact.validate()
+        if artifact.provenance is None:
+            raise ArtifactCompatibilityError("Artifact lacks complete method hyperparameters; regenerate it")
+        artifact.provenance.validate_method_h_params(context.config.require_method_h_params())
         if artifact.provenance is not None:
             for name, expected in (
                 ("model_content", context.editor.model_content_identity),
@@ -153,7 +156,7 @@ class ReplayPreparer:
                     raise ArtifactCompatibilityError(f"Artifact {name} does not match this run")
             guidance = artifact.provenance.guidance_scale
             if guidance is not None and not math.isclose(
-                guidance, context.config.sampling.guidance_scale, rel_tol=0, abs_tol=1e-9,
+                guidance, context.config.inversion_guidance_scale, rel_tol=0, abs_tol=1e-9,
             ):
                 raise ArtifactCompatibilityError("Artifact production guidance does not match this run")
         method.validate_replay(artifact, context)
@@ -166,7 +169,7 @@ class ReplayPreparer:
         self.validate(loaded.artifact, method, context)
         parameters = loaded.reference.group.parameters
         if not math.isclose(
-            parameters["guidance_scale"], context.config.sampling.guidance_scale,
+            parameters["guidance_scale"], context.config.inversion_guidance_scale,
             rel_tol=0, abs_tol=1e-9,
         ):
             raise ArtifactCompatibilityError("Artifact group guidance scale does not match this run")

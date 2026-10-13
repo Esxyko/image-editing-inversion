@@ -49,6 +49,7 @@ class _DiagnosticOutput:
             return
         package = Path(__file__).resolve().parents[1]
         sources = (
+            "config/models.py", "config/loader.py", "config/method_parameters.py",
             "diagnostic.py", "workflows/null_text_diagnostic.py",
             "inversion/methods/null_text.py", "inversion/components.py", "inversion/validation.py",
             "generation/runtime.py", "generation/editor.py", "generation/denoising.py",
@@ -68,6 +69,9 @@ class _DiagnosticOutput:
             "device": str(context.editor.device),
             "model_dtype": str(context.editor.dtype),
             "embedding_parameter_dtype": "torch.float32",
+            "pivot_guidance_scale": context.config.inversion_guidance_scale,
+            "optimization_guidance_scale": context.config.editing_guidance_scale,
+            "reconstruction_guidance_scale": context.config.editing_guidance_scale,
             "forward_timesteps": list(context.editor.expected_timesteps),
             "inverse_timesteps": [int(t) for t in inverse.timesteps.tolist()],
             "forward_scheduler_config": context.editor.scheduler_config,
@@ -139,7 +143,7 @@ class _OptimizationTrace:
 
     @torch.no_grad()
     def finish_step(self, errors: torch.Tensor, counts: Sequence[int], latent: torch.Tensor) -> None:
-        metrics = torch.cat([values for _, values in self._updates]).cpu().tolist()
+        metrics = torch.cat([values for _, values in self._updates]).cpu().tolist() if self._updates else []
         traces = [
             {key: [] for key in (
                 "inner_losses", "gradient_norms", "embedding_update_norms", "effective_embedding_change_fraction",
@@ -172,9 +176,10 @@ class _OptimizationTrace:
                 "learning_rate": self._learning_rate,
                 "early_stop_threshold": self._tolerance,
                 "actual_num_inner_steps": count,
-                "stop_reason": "threshold_reached" if losses[-1] < self._tolerance else "max_inner_steps",
-                "early_stop_loss_before_update": losses[-1],
-                "loss_before": losses[0],
+                "stop_reason": ("guidance_one" if not losses else
+                                "threshold_reached" if losses[-1] < self._tolerance else "max_inner_steps"),
+                "early_stop_loss_before_update": losses[-1] if losses else None,
+                "loss_before": losses[0] if losses else None,
                 "loss_after": loss_after,
                 "best_loss": min(losses + [loss_after]),
                 "loss_after_below_threshold": loss_after < self._tolerance,

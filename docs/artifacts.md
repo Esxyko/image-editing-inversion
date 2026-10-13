@@ -18,15 +18,31 @@ Each image has a floating `artifacts/<i>/terminal_latent` tensor of shape
 `artifacts/<i>/state/<name>` tensors have one entry per timestep and are interpreted
 by the registered method's hook. Images, captions, and masks stay in the dataset.
 
-Each schema-v1 file embeds JSON-encoded `ids` and aligned `entries` lists in its
+Schema v2 additionally supports `artifacts/<i>/static/<name>` for nonempty finite
+method-defined tensors that do not vary by timestep. All bundled methods use these for the
+original source conditional and unconditional `[1, tokens, hidden]` embeddings.
+They are stored once per image and reused without modifying latent updates.
+DDIM has no per-step state; Null-text retains optimized unconditional embeddings;
+ReNoise retains its guidance state; Direct retains its original per-step residuals.
+The experimental `source_latents` / `direct_source_latents` overwrite variants
+have been withdrawn. Built-in replay rejects these tensors and requires regeneration.
+
+Each schema-v1/v2 file embeds JSON-encoded `ids` and aligned `entries` lists in its
 safetensors metadata. `entries[i]` indexes a production record in the JSON-encoded
 `contexts` list for `ids[i]`. Common production records are stored once, while
 every UID retains its own source association.
+New files also embed a JSON `checksums` field containing a SHA-256 digest of the
+production metadata and a digest of every tensor's dtype, shape, and exact bytes.
+Readers accept this additive field in both collection schemas. Loaded entries
+are verified before replay; mismatches are malformed artifacts, even when the
+damaged values remain finite. Checksums are carried through streaming assembly,
+and the assembled file is verified before replacing a published group.
 The raw dataset UID at `ids[i]` identifies tensors under `artifacts/<i>/`.
 UIDs such as `image:1` are stored verbatim. The method comes from the method
 directory and steps/guidance from the group name. Guidance values are written
 without rounding, with whole values such as `7.0` written as `7`.
-`h-params.json` records `num_inference_steps` and `guidance_scale`.
+`h-params.json` records `num_inference_steps` and `guidance_scale`; the latter
+is inversion CFG. Target-editing CFG is recorded in the complete method snapshot.
 Parameter filenames and attention replacement fractions do not affect grouping.
 Method IDs must be lowercase portable directory names, using letters, digits,
 dots, underscores, or hyphens, without reserved Windows names or a trailing dot.
@@ -40,9 +56,11 @@ and `method_id`. Its required `pipeline_h_params` contains steps and guidance.
 Replacements retain their existing positions; new IDs append in traversal order.
 The catalog uses schema v2 with per-ID input matching and one checksum per group
 file. Matching includes dataset identity/UID, model and scheduler settings,
-guidance, effective method hyperparameters, and numerical runtime settings.
-Missing, damaged, or incompatible
-cached entries are recomputed; malformed catalogs fail clearly.
+inversion guidance, complete method hyperparameters, and numerical runtime settings.
+Missing or incompatible cached entries are recomputed. An existing group whose
+integrity cannot be verified blocks publication and remains untouched, preventing
+limited or source-filtered runs from discarding unselected records. Malformed
+catalogs fail clearly.
 
 ## Publication and interruption
 
@@ -60,28 +78,51 @@ unpublished work is recomputed on the next run. Temporary files are excluded
 from discovery and cleaned up when the transaction exits normally or with an error.
 Catalog updates assume one active writer. A failure between file publication and
 catalog publication can leave an uncataloged file available for explicit replay;
-stale cache entries will miss and require recomputation.
+new files remain independently verifiable through their embedded checksums.
+The next inversion invocation verifies the entire published file before merging,
+preserves unselected entries, and publishes the actual current file checksum to
+the catalog. Stale per-ID cache entries still undergo provenance checks and miss
+when their production inputs do not match.
 
-Only current schema-v1 group files and catalog-v2 entries with cache identity version 2
-are reusable. Previous artifact formats (including schema v5) and older cache identities require regeneration;
-`diffuse` treats them as misses and replaces them only after successful publication. Legacy
+Older files without embedded checksums require a matching catalog-v2 group checksum.
+They are verified in full before replay or merging, and merged output acquires
+embedded checksums. A missing or mismatching legacy checksum cannot distinguish
+catalog lag from file damage: replay skips files with no integrity baseline and
+rejects checksum mismatches; inversion preserves the original file and stops.
+Restore a verified copy and its catalog, or regenerate separately after preserving
+the original. The workflow never creates a trusted checksum from unverified data.
+
+Current schema-v1/v2 group files with complete matching method snapshots and
+catalog-v2 entries with cache identity version 3 are reusable. Previous artifact
+formats (including schema v5), missing snapshots, and older cache identities require regeneration.
+Missing snapshots and older identities are cache misses within verifiable collections;
+unsupported or unverifiable existing group files are preserved and block replacement. Legacy
 per-sample directories, hash-named groups, and catalog-v1 entries are ignored
 without deletion. The old catalog is replaced only after successful new-format
 publication. Both workflows write results to the fixed `data/output/` root.
+
+Collections with static tensors write schema v2; collections without them retain
+schema v1. Streaming group assembly can retain older v1 entries alongside v2
+entries. All bundled methods now use `source_embedding_version: 1`, which
+invalidates the withdrawn overwrite cache identities and records original source
+encodings. Native legacy artifacts without static encodings remain supported by
+explicit replay using the original text-encoding path when they have complete
+matching method snapshots and a verifiable integrity baseline. Batches mixing artifacts
+with and without captured encodings require regeneration. Fresh embedding state
+does not depend on intermediate caches during replay.
 
 ## Cache reuse
 
 Changing only attention fractions or editing policies reuses inversion. The
 bundled deterministic methods also reuse inversion when the editing seed
-changes. Changing steps or guidance creates a new group; changing other effective
-inversion settings replaces the sample's artifact in its group. Method
+changes. Changing steps or inversion CFG creates a new group; changing any other
+method setting, including editing CFG, replaces the sample's artifact in its group. Method
 hyperparameters are loaded for cache matching using the
 same validated settings as inversion. Each run generates its RGB pixel tensors again.
-Null-text matches the effective per-step stopping thresholds; an unused increment
-for a one-step schedule does not invalidate inversion. ReNoise matches the
-prediction interval selected at each actual timestep, omitting inactive averaging
-windows, unused low-timestep caps, and predictions after the selected average.
-Hyperparameter files still undergo the existing full validation. Inactive
+The additional algorithm identity records effective Null-text stopping thresholds
+and ReNoise prediction intervals, but complete snapshot matching also includes
+unused increments, averaging windows, and low-timestep caps. Hyperparameter files
+undergo full validation. Inactive
 scheduler clipping/thresholding values and unused beta defaults are also omitted.
 Result records include the parameter filename, combined artifact path,
 `artifact_index`, and `artifact_reused`; cache hits have `inversion_seconds: 0.0`.
@@ -135,10 +176,12 @@ Cache hits report zero for all three values; replay-only records use `null`.
 
 Workflow inversion also reuses intermediate components across methods, parameter
 files, and runs. All bundled methods share source VAE latents and unconditional
-and conditional caption embeddings. Direct and Null-text additionally share the
-complete conditional DDIM pivot trajectory, including the terminal pivot. Their
-residuals and optimized embeddings remain method-specific; DDIM and ReNoise
-compute their own terminal latents.
+and conditional caption embeddings. Direct and Null-text additionally cache the
+complete DDIM pivot trajectory, including the terminal pivot. Direct uses CFG 1;
+Null-text uses inversion CFG. They can share pivots when the pivot CFG matches.
+Direct artifacts bind these source encodings and reference latents for replay;
+Null-text's optimized embeddings remain method-specific. DDIM and ReNoise compute
+their own terminal latents.
 
 Intermediate entries live separately from replay artifacts:
 
@@ -155,11 +198,13 @@ content to VAE, text encoder, and tokenizer only, so changing UNet weights alone
 does not invalidate source encoding. Source-code hashes,
 hardware identity, PyTorch builds, CPU thread counts, and dependency
 versions are excluded. Pivot identity adds UNet content, scheduler settings,
-and timesteps to
-the semantic source identity; exact input-tensor bytes are not part of its key.
+timesteps, pivot CFG, and checksums of the actual source latent and conditional embedding
+to the semantic source identity. Pivots cannot be reused with newly encoded source
+tensors that differ numerically from their original inputs. Guided pivots also
+include a checksum of the actual unconditional embedding.
 Payload checksums still detect damaged cache files. Source
 components do not depend on sampling steps or guidance; conditional pivots depend
-on the schedule but not guidance or downstream method hyperparameters.
+on the schedule and pivot CFG, but not downstream optimization settings.
 
 Intermediate identity deliberately excludes batch size and composition. Cached
 images can be assembled into a different batch, and only missing components enter
@@ -181,7 +226,7 @@ Method helpers own guidance/scheduler checks and artifact construction. `Inversi
 Workflows supply a `SharedInversionComponents(IntermediateCache())` provider;
 direct method calls without a provider compute locally. Cache reads and shared
 computations produce detached ordinary tensors suitable for Null-text autograd.
-Previous artifact formats require regeneration; current schema-v1 entries preserve
+Previous artifact formats require regeneration; current schema-v1/v2 entries preserve
 production identity across group merges. Code changes do not automatically
 invalidate caches; remove affected cache entries when recomputation is needed.
 
@@ -257,16 +302,16 @@ Metrics are defined as follows:
 | Field | Meaning |
 | --- | --- |
 | `inner_losses` | MSE before each Adam update, in update order |
-| `loss_before` | First entry of `inner_losses` |
-| `loss_after` | MSE measured after the last Adam update; matches that sample's `reconstruction_mse[step_index]` |
+| `loss_before` | First entry of `inner_losses`, or null when guidance 1 skips optimization |
+| `loss_after` | MSE measured after the last Adam update, or after the conditional-only step at guidance 1; matches that sample's `reconstruction_mse[step_index]` |
 | `best_loss` | Minimum of the observed pre-update losses and final post-update loss |
 | `gradient_norms` | L2 norm of the unconditional embedding's float32 gradient for each update |
 | `embedding_update_norms` | L2 norm of the float32 embedding parameter change per update |
 | `effective_embedding_change_fraction` | Fraction of embedding elements that differ before/after an update after both are cast to the model dtype |
 | `learning_rate`, `early_stop_threshold` | Actual step-specific optimizer learning rate and stopping threshold |
 | `actual_num_inner_steps` | Number of Adam updates; also the length of all per-update arrays |
-| `stop_reason` | `threshold_reached` if the last pre-update loss is below the threshold, otherwise `max_inner_steps` |
-| `early_stop_loss_before_update` | Last pre-update loss, used by the ordinary early-stop check |
+| `stop_reason` | `guidance_one` when guidance 1 skips optimization; otherwise `threshold_reached` if the last pre-update loss is below the threshold, or `max_inner_steps` |
+| `early_stop_loss_before_update` | Last pre-update loss, used by the ordinary early-stop check, or null when optimization is skipped |
 | `loss_after_below_threshold` | Whether the final post-update loss also satisfies the threshold |
 
 All losses compare scaled VAE latents in float32, not decoded RGB pixels. The
@@ -301,7 +346,13 @@ use `batches.jsonl` for aggregate timing instead of summing those repeated field
 Null-text results include `actual_num_inner_steps`, the list of actual Adam update
 counts in the artifact's descending timestep order, and `total_inner_steps`, their
 sum. These counts describe the original inversion and are retained for cache hits
-and replay. Older Null-text artifacts without counts remain reusable and report
+and replay. Counts are zero when optimization/editing CFG is 1. Artifacts must
+carry `optimization_guidance_scale`, equal to the current editing CFG; source
+reconstruction uses that saved scale too. Earlier artifacts optimized at
+inversion CFG require regeneration. Null-text artifacts also carry
+`pivot_guidance_scale`, equal to inversion CFG. Earlier fixed-CFG-1 pivot artifacts
+without that state require regeneration; pivot-guidance versioning invalidates
+their automatic cache reuse. Compatible artifacts without counts report
 `null` for both fields; newly computed inversions persist counts in per-step state.
 Null-text results also include `reconstruction_mse`, the per-timestep latent MSE
 after all Adam updates, and `final_reconstruction_mse`, its last entry. Each error
@@ -309,7 +360,7 @@ compares the optimized trajectory latent against the corresponding target pivot
 in float32; the final error compares against the source image's encoded latent.
 These values describe the original inversion, not decoded-image pixel error or
 a new replay measurement. They are persisted with the artifact and retained for
-cache hits and replay. Older artifacts without errors remain reusable and report
+cache hits and replay. Artifacts with complete matching snapshots but without errors remain reusable and report
 `null` for both error fields; recompute inversion to populate them.
 Cache hits retain their lookup batch ID, replay-only inversions use `null`, and
 skipped samples have no edit batch ID (`null`).
@@ -359,7 +410,11 @@ A replay sweep through `edit_artifacts` records incompatible artifact/file pairs
 with a reason and continues with compatible pairs. Malformed artifacts and
 operational failures stop execution. If every pair is skipped, the API
 raises an error. Explicit replay continues to support existing
-uncataloged artifacts and does not read method hyperparameter files.
+uncataloged artifacts with complete matching method snapshots and embedded checksums.
+Legacy files need a matching catalog-v2 checksum. It reads current
+method YAML files for strict parameter matching, without rerunning inversion.
+Missing snapshots and differing parameters are compatibility mismatches: cache
+lookup recomputes them, while explicit replay skips them with a reason.
 
 Use `InversionArtifact` for each image's inversion result and
 `ArtifactCatalog.store_group` to publish a collection. Use the same model revision,
@@ -372,8 +427,11 @@ original production record, even when entries came from different runs.
 
 `ArtifactCollection(path)` exposes ordered `ids`, `references`, and
 `reference(sample_uid)`. Each `ArtifactReference` contains `path`, `index`, and
-`sample_uid`. `collection.load(reference, settings=...)` loads only the selected
-entry and verifies its UID at that index. `with collection.reader() as reader:`
+`sample_uid`. `collection.load(reference, settings=...)` loads the selected
+entry and verifies its UID and tensor checksums. Legacy files without embedded
+checksums undergo one full integrity scan when first read; tensors are inspected
+one at a time. `collection.validate_integrity()` verifies an entire merge base.
+`with collection.reader() as reader:`
 allows repeated `reader.load(reference, settings=...)` calls with one native
 header parse. Cache lookup batches use `catalog.lookup_batch(settings=...)` and
 its `lookup(inputs)` method. Readers clone selected tensors into independent CPU
@@ -385,9 +443,10 @@ these settings automatically. The coordinator fills missing provenance on
 new adapter results, so existing adapters do not need to change their return
 constructors. Standalone artifact producers should supply provenance themselves
 when their files will be loaded by a workflow.
-The current collection format resets `schema_version` to `1` while retaining
-the indexed tensors and production metadata. Previous formats, including the
-original schema-v1 layout and schema v2/v3/v4/v5, require regeneration with `diffuse`.
+The current indexed collection format supports schema v1 and schema v2, the
+latter adding static tensors while retaining indexed production metadata. Older
+pre-indexed layouts (including the historical v1/v2/v3/v4/v5 formats) require
+regeneration with `diffuse`; their metadata/layout differs from current v1/v2.
 `InversionArtifact.validate_terminal_latent()` checks shape, floating dtype,
 positive spatial dimensions, and finite values. Construction, staged serialization,
 and editing validation share this check without loading an entire collection's
@@ -400,14 +459,18 @@ For the project Hub dataset, an external inversion implementation can package
 its computed `z_t` tensor as follows:
 
 ```python
+from dataclasses import replace
 from image_editing_inversion.artifacts import ArtifactCatalog, ArtifactProvenance, InversionArtifact
 from image_editing_inversion.config import load_config
 from image_editing_inversion.data import DatasetRepository
 from image_editing_inversion.generation import Editor
+from image_editing_inversion.inversion import get_method
 
 repository = DatasetRepository()
 records = repository.dataset
 config = load_config("default.yaml")
+method = get_method("external-ddim")  # Register the adapter before this example.
+config = replace(config, method_h_params=dict(method.method_h_params(config)))
 editor = Editor(config)
 sample = records[0]
 # z_t is a [1, 4, 64, 64] tensor produced by an inversion implementation.
@@ -428,14 +491,15 @@ artifact = InversionArtifact(
         model_commit=editor.model_commit,
         dataset_content=repository.content_digest,
         numerics=editor.inversion_cache_settings(),
-        guidance_scale=config.sampling.guidance_scale,
+        guidance_scale=config.inversion_guidance_scale,
+        method_h_params=config.require_method_h_params(),
     ),
 )
 reference, = ArtifactCatalog().store_group(
     [artifact],
     pipeline_h_params={
         "num_inference_steps": config.sampling.num_inference_steps,
-        "guidance_scale": config.sampling.guidance_scale,
+        "guidance_scale": config.inversion_guidance_scale,
     },
 )
 print(reference.sample_uid)  # Pass this raw UID to edit_artifacts; cache inputs are optional.
@@ -443,7 +507,8 @@ print(reference.sample_uid)  # Pass this raw UID to edit_artifacts; cache inputs
 
 Before replay, install an `InversionMethod` adapter registered as
 `external-ddim`, even if it uses the default P2P behavior and no denoising hook.
-New collections use schema v1 with the aligned IDs embedded in safetensors.
+Collections use schema v1, or v2 when static state is present, with aligned IDs
+embedded in safetensors.
 
 ```python
 from image_editing_inversion.workflows import edit_artifacts
@@ -454,7 +519,7 @@ print(run_dir)
 
 The optional `artifact_id` argument accepts a raw dataset sample UID. Every matching
 position across method/settings groups is replayed. Call `edit_artifacts()` without
-an ID to replay every published schema-v1 collection, including uncached entries,
+an ID to replay every supported published collection, including uncached entries,
 in relative group-path order followed by positional order. Hidden staging files,
 legacy layouts, and symlinks are excluded. Malformed collections, missing IDs,
 and an empty artifact repository produce clear errors. Replay batches are flushed
@@ -476,15 +541,22 @@ parameter file. Results are written under `data/output/<run-id>/` with a
 schema-v2 `sweep.json` manifest and `<parameter-file>/<method>/` children containing
 `results.jsonl`, `batches.jsonl`, `resolved-config.json`, and RGB batch files under `tensors/`.
 
-For inversion runs, `resolved-config.json` also contains `method_h_params`: the
-method's resolved hyperparameters, including defaults, captured from the same
-adapter settings used by inversion. Null-text records `num_inner_steps`,
-`learning_rate`, `early_stop_epsilon`, and `epsilon_increment`; ReNoise records
-its refinement counts, averaging flag, and averaging ranges. Methods without
-separate hyperparameters record `{}`. Cached inversion runs retain the requested
-method settings alongside the per-sample `artifact_reused` flag. Explicit replay
-records `null`, since it does not load or use method parameter files; this field
-does not claim to describe the original production settings of replayed artifacts.
+For inversion and replay runs, `resolved-config.json` contains `method_h_params`:
+the complete current method settings, including all defaults and both CFG values.
+The bound `config.method_h_params` records the same normalized snapshot. DDIM and
+Direct record their two CFG values; Null-text and ReNoise also record all of their
+optimization or refinement settings. Per-image provenance contains an optional
+`method_h_params` snapshot. Legacy metadata without that field remains readable,
+but cannot pass cache reuse or replay compatibility checks. Readers accept the
+additional provenance field without changing collection tensor schemas.
+
+Final inversion cache identity version `3` includes the complete snapshot alongside
+existing algorithm `method_parameters` and production inputs. Any parameter
+change, including editing CFG or a currently unused optimization setting, prevents
+reuse. Direct, Null-text and ReNoise per-step guidance and provenance's historical
+`guidance_scale` field denote inversion CFG. Published directory names still use
+`steps-N_guidance-G` with inversion CFG; changing other parameters republishes
+selected UIDs in that group and preserves entries outside the selected prefix.
 
 The manifest includes a top-level `dataset` field from its initial creation:
 `"pie-bench"` or `"magic-brush"` for a selected source, and `null` when the

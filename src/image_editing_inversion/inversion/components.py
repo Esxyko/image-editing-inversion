@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
 import torch
 
-from ..artifacts.intermediates import IntermediateCache, TensorSpecs
+from ..artifacts.intermediates import IntermediateCache, TensorSpecs, tensor_checksum
+from ..config.validation import number
 from .context import InversionContext
 from .validation import require_finite
 
@@ -55,15 +56,22 @@ def prepare_sources(
 
 
 def _conditional_pivots(
-    latent: torch.Tensor, conditional: torch.Tensor, scheduler: DDIMInverseScheduler,
-    context: InversionContext, label: str,
+    latent: torch.Tensor, embeddings: torch.Tensor, scheduler: DDIMInverseScheduler,
+    context: InversionContext, label: str, guidance_scale: float = 1.0,
 ) -> list[torch.Tensor]:
+    _, conditional = embeddings.chunk(2)
     pivots = [latent.detach().to(device="cpu").clone().contiguous()]
     for timestep in scheduler.timesteps:
-        model_input = scheduler.scale_model_input(latent, timestep)
+        model_input = latent if guidance_scale == 1 else torch.cat((latent, latent))
+        model_input = scheduler.scale_model_input(model_input, timestep)
         prediction = context.editor.pipeline.unet(
-            model_input, timestep, encoder_hidden_states=conditional,
+            model_input, timestep,
+            encoder_hidden_states=conditional if guidance_scale == 1 else embeddings,
         ).sample
+        if guidance_scale != 1:
+            negative, positive = prediction.chunk(2)
+            prediction = negative + guidance_scale * (positive - negative)
+        require_finite(prediction, "pivot noise prediction", label)
         latent = scheduler.step(prediction, timestep, latent).prev_sample
         require_finite(latent, "pivot latent", label)
         pivots.append(latent.detach().to(device="cpu").clone().contiguous())
@@ -74,11 +82,14 @@ def _conditional_pivots(
 @torch.no_grad()
 def conditional_pivots(
     sources: SourceBatch, uids: Sequence[str], scheduler: DDIMInverseScheduler,
-    context: InversionContext, label: str,
+    context: InversionContext, label: str, *, guidance_scale: float = 1.0,
 ) -> list[torch.Tensor]:
+    guidance_scale = number(guidance_scale, "pivot guidance scale")
     if context.components is None:
-        return _conditional_pivots(sources.latent, sources.conditional, scheduler, context, label)
-    return context.components.conditional_pivots(sources, uids, scheduler, context, label)
+        return _conditional_pivots(sources.latent, sources.embeddings, scheduler, context, label, guidance_scale)
+    return context.components.conditional_pivots(
+        sources, uids, scheduler, context, label, guidance_scale=guidance_scale,
+    )
 
 
 class SharedInversionComponents:
@@ -162,21 +173,29 @@ class SharedInversionComponents:
         embeddings = editor.to_device(torch.cat(
             [entry["unconditional"] for entry in resolved] + [entry["conditional"] for entry in resolved]
         ), dtype=editor.dtype)
-        return SourceBatch(latent, embeddings, tuple(inputs))
+        identities = tuple({
+            **item,
+            "source_tensor_checksums": {
+                "latent": tensor_checksum(entry["latent"]),
+                "conditional": tensor_checksum(entry["conditional"]),
+            },
+        } for item, entry in zip(inputs, resolved, strict=True))
+        return SourceBatch(latent, embeddings, identities)
 
     @torch.inference_mode(False)
     @torch.no_grad()
     def conditional_pivots(
         self, sources: SourceBatch, uids: Sequence[str], scheduler: DDIMInverseScheduler,
-        context: InversionContext, label: str,
+        context: InversionContext, label: str, *, guidance_scale: float = 1.0,
     ) -> list[torch.Tensor]:
+        guidance_scale = number(guidance_scale, "pivot guidance scale")
         editor = context.editor
         shape = (len(editor.expected_timesteps) + 1, 1, *sources.latent.shape[1:])
         specs = {"pivots": (shape, editor.dtype)}
         inputs: list[dict[str, Any]] = []
         entries: list[torch.Tensor | None] = []
         missing: list[int] = []
-        conditional = sources.conditional
+        unconditional, conditional = sources.embeddings.chunk(2)
         for index, uid in enumerate(uids):
             if sources.identities[index]["sample_uid"] != uid:
                 raise ValueError("Pivot source identities must match the requested sample order")
@@ -184,7 +203,10 @@ class SharedInversionComponents:
                 **sources.identities[index], "scheduler_config": editor.scheduler_config,
                 "unet_content": dict(editor.component_content_identity(("unet",))),
                 "timesteps": list(editor.expected_timesteps),
+                "pivot_guidance_scale": guidance_scale,
             })
+            if guidance_scale != 1:
+                inputs[-1]["unconditional_checksum"] = tensor_checksum(unconditional[index:index + 1])
             entry = self._cache.load("conditional_pivots", inputs[-1], specs=specs)
             entries.append(None if entry is None else entry["pivots"])
             if entry is None:
@@ -194,7 +216,9 @@ class SharedInversionComponents:
         if missing:
             indices = torch.tensor(missing, device=editor.device, dtype=torch.long)
             pivots = _conditional_pivots(sources.latent.index_select(0, indices),
-                                         conditional.index_select(0, indices), scheduler, context, label)
+                                         torch.cat((unconditional.index_select(0, indices),
+                                                    conditional.index_select(0, indices))),
+                                         scheduler, context, label, guidance_scale)
             producer = [uids[index] for index in missing]
             for position, index in enumerate(missing):
                 trajectory = torch.stack([pivot[position:position + 1] for pivot in pivots]).contiguous()

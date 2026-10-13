@@ -16,10 +16,12 @@ if TYPE_CHECKING:
 def validate_sampling(config: ExperimentConfig, label: str, *, null_text: bool = False) -> None:
     if config.sampling.eta != 0:
         raise ValueError(f"{label} inversion requires sampling.eta == 0")
-    scale = config.sampling.guidance_scale
-    if not math.isfinite(scale) or (scale <= 1 if null_text else scale < 0):
-        requirement = "> 1" if null_text else "finite and nonnegative"
-        raise ValueError(f"{label} inversion requires sampling.guidance_scale {requirement}")
+    scale = config.inversion_guidance_scale
+    if not math.isfinite(scale) or (scale < 1 if null_text else scale < 0):
+        requirement = ">= 1" if null_text else "finite and nonnegative"
+        raise ValueError(f"{label} inversion requires method_h_params.inversion_guidance_scale {requirement}")
+    if null_text and (not math.isfinite(config.editing_guidance_scale) or config.editing_guidance_scale < 1):
+        raise ValueError(f"{label} optimization requires method_h_params.editing_guidance_scale >= 1")
 
 
 def inverse_scheduler(context: InversionContext, label: str) -> DDIMInverseScheduler:

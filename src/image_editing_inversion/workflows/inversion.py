@@ -30,7 +30,7 @@ class InversionCoordinator:
     def group(self, method: InversionMethod, context: InversionContext) -> ArtifactGroupPublication:
         return self._catalog.group(method.method_id, pipeline_h_params={
             "num_inference_steps": context.config.sampling.num_inference_steps,
-            "guidance_scale": context.config.sampling.guidance_scale,
+            "guidance_scale": context.config.inversion_guidance_scale,
         })
 
     def cache_inputs(
@@ -47,7 +47,7 @@ class InversionCoordinator:
         if not isinstance(parameters, Mapping):
             raise TypeError("inversion_cache_parameters must return a mapping or None")
         inputs = {
-            "cache_version": 2,
+            "cache_version": 3,
             **context.source_identity(),
             "method_id": method.method_id,
             "scheduler": {
@@ -55,8 +55,9 @@ class InversionCoordinator:
                 "timesteps": list(context.editor.expected_timesteps),
                 "eta": context.config.sampling.eta,
             },
-            "guidance_scale": context.config.sampling.guidance_scale,
+            "guidance_scale": context.config.inversion_guidance_scale,
             "method_parameters": dict(parameters),
+            "method_h_params": context.config.require_method_h_params(),
         }
         self._identity_inputs = json.loads(json.dumps(inputs, sort_keys=True, allow_nan=False))
         self._identity_context = context
@@ -77,6 +78,7 @@ class InversionCoordinator:
         if cache_inputs is not None and (
             artifact.provenance is None
             or artifact.provenance.method_parameters != cache_inputs["method_parameters"]
+            or artifact.provenance.method_h_params != cache_inputs["method_h_params"]
         ):
             raise ValueError("Artifact production parameters do not match its cache inputs")
         self._replay.validate(artifact, method, context)
@@ -161,8 +163,9 @@ class InversionCoordinator:
                                 dataset_content=context.dataset_content,
                                 numerics=context.editor.inversion_cache_settings(),
                                 method_parameters=None if inputs[index] is None else inputs[index]["method_parameters"],
-                                guidance_scale=context.config.sampling.guidance_scale,
+                                guidance_scale=context.config.inversion_guidance_scale,
                                 model_commit=context.editor.model_commit,
+                                method_h_params=context.config.require_method_h_params(),
                             )
                         self.validate(artifact, method, uids[index], context, cache_inputs=inputs[index])
                         resolved[index] = artifact

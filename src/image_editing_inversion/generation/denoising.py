@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 import hashlib
+import math
 from typing import Any, Sequence
 
 from diffusers.models.attention_processor import AttnProcessor, AttnProcessor2_0
@@ -189,6 +190,20 @@ class _DenoisingExecutor:
         pipeline = runtime.pipeline
         scheduler = pipeline.scheduler
         config = runtime.config
+        # Method hooks can request the source CFG used to calibrate their state.
+        # Target editing has its own CFG; tensors are ordered as all sources/targets.
+        batch_size = len(sample_uids)
+        source_guidance = []
+        for hook in ([batch_hook] * batch_size if batch_hook is not None else hooks):
+            scale = None if hook is None else hook.reconstruction_guidance_scale
+            scale = config.editing_guidance_scale if scale is None else scale
+            if isinstance(scale, bool) or not isinstance(scale, (int, float)) or not math.isfinite(scale) or scale < 0:
+                raise ValueError("Reconstruction guidance scale must be finite and nonnegative")
+            source_guidance.append(scale)
+        guidance = latents.new_tensor(
+            source_guidance
+            + [config.editing_guidance_scale] * batch_size
+        ).reshape(2 * batch_size, 1, 1, 1)
         generators = [
             self._noise_generator(config.sampling.seed, uid, runtime.device)
             for uid in sample_uids
@@ -223,7 +238,7 @@ class _DenoisingExecutor:
                     model_input, timestep, encoder_hidden_states=embeddings,
                 ).sample
                 unconditional, conditional = prediction.chunk(2)
-                guided = unconditional + config.sampling.guidance_scale * (conditional - unconditional)
+                guided = unconditional + guidance * (conditional - unconditional)
                 step_kwargs: dict[str, Any] = {"eta": config.sampling.eta}
                 if state.variance_noise is not None:
                     step_kwargs["variance_noise"] = state.variance_noise

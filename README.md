@@ -34,8 +34,8 @@ directory. Run the `uv` examples from the project root; the environment's instal
 | Location | Settings |
 | --- | --- |
 | [config.yaml](config.yaml) | Model/revision/resolution, eta/seed, P2P mode, runtime, optional per-method P2P settings |
-| [pipeline_h_params/](pipeline_h_params/) | Steps, guidance, cross-attention fraction, self-attention fraction |
-| [method_h_params/](method_h_params/) | Inversion-only Null-text and ReNoise parameters |
+| [pipeline_h_params/](pipeline_h_params/) | Steps, cross-attention fraction, self-attention fraction |
+| [method_h_params/](method_h_params/) | Per-method inversion CFG, target-editing CFG, and algorithm parameters |
 
 Hold shared configuration, method parameters, and the dataset fixed for a
 comparison. Vary pipeline parameter files to sweep sampling and editing settings.
@@ -44,14 +44,32 @@ Each pipeline YAML requires:
 ```yaml
 sampling:
   num_inference_steps: 30
-  guidance_scale: 7.5
 prompt_to_prompt:
   cross_replace_fraction: 0.4
   self_replace_fraction: 0.6
 ```
 
-Steps must be positive, guidance finite and nonnegative, and fractions within
-`[0, 1]`. Unknown settings and misplaced pipeline settings are rejected.
+Steps must be positive and fractions within `[0, 1]`.
+Unknown settings and misplaced pipeline settings are rejected, including the old
+pipeline `guidance_scale` field. Each method YAML includes:
+
+```yaml
+inversion_guidance_scale: 7.5
+editing_guidance_scale: 7.5
+```
+
+Both CFG values must be finite and nonnegative; Null-text requires both to be
+at least `1`. Null-text optimizes its empty-caption embeddings at editing CFG
+and uses that same CFG for source reconstruction and target editing. Its
+DDIM pivots use inversion CFG. When editing CFG is `1`, Adam updates
+are skipped because their gradients are zero. Source reconstruction uses editing
+CFG for every bundled method. All target
+branches use editing CFG. DDIM and Direct read `DDIM.yaml` and `Direct.yaml`; Null-text and
+ReNoise retain their existing method files. Method parameters are loaded for both
+inversion and replay. Cache reuse and replay require the complete current method
+parameters to match the saved snapshot, including editing CFG. Historical artifacts
+without that snapshot require regeneration. Older Null-text artifacts without
+inversion-CFG pivot state also require regeneration.
 P2P `auto` selects replacement for equal whitespace-word counts and refinement
 otherwise. Method-specific P2P extras do not override shared mode or fractions.
 
@@ -181,8 +199,8 @@ run_dir = edit_artifacts()            # All published artifacts, all parameter f
 # run_dir = edit_artifacts("435242:2") # Every matching artifact for one raw dataset UID
 ```
 
-Replay uses registered adapters and saved state without reading inversion
-hyperparameters or recomputing inversion. Incompatible artifact/file pairs are
+Replay uses registered adapters and saved state, loading current method
+hyperparameters for full snapshot matching without recomputing inversion. Incompatible artifact/file pairs are
 recorded as `skipped`; malformed artifacts and operational failures stop execution.
 If every pair is skipped, replay raises an error.
 
@@ -217,10 +235,14 @@ At 512x512, two results occupy 1.5 MiB per sample; a full 1,400-sample, four-met
 run stores about 8.2 GiB of pixels. See [tensor loading examples](docs/artifacts.md#rgb-tensor-outputs).
 
 Changing attention fractions or editing policies reuses compatible inversions.
-Changing steps or guidance selects another artifact group. Other effective
-inversion changes replace affected entries only after successful publication.
+Changing steps or inversion CFG selects another artifact group. Changing any
+method hyperparameter, including editing CFG, invalidates reuse; affected entries
+are replaced only after successful publication.
 Interrupted inversion leaves the previous published group intact; editing failure
-leaves completed inversions reusable. Use `batches.jsonl` for aggregate timing:
+leaves completed inversions reusable. New artifacts embed metadata and tensor checksums,
+so valid published files remain recoverable when catalog updates are interrupted.
+Unverifiable existing groups are preserved and block replacement; legacy replay
+requires a matching catalog checksum. Use `batches.jsonl` for aggregate timing:
 per-image batch durations repeat and must not be summed across members.
 
 ## References
@@ -228,6 +250,7 @@ per-image batch durations repeat and must not be summed across members.
 - [Dataset schema and provenance](docs/dataset.md)
 - [Bundled methods and hyperparameters](docs/methods.md)
 - [Artifact formats, caching, replay, and timing](docs/artifacts.md)
+- [Direct reconstruction diagnostic tests](docs/direct-reconstruction-tests.md)
 - [Adapters, attention extensions, and API migration](docs/adapters.md)
 - [Architecture and module responsibilities](structure.md)
 

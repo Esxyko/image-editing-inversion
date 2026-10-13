@@ -15,12 +15,14 @@ from typing import Any, Iterator, Sequence
 from safetensors import safe_open
 from safetensors.torch import save_file
 
+from .integrity import _CollectionIntegrity
+from .intermediates import tensor_checksum
 from .inversion import ArtifactCompatibilityError, ArtifactProvenance, ArtifactSettings, InversionArtifact
 from .layout import ArtifactGroup
 
 
 _FILENAME = "artifacts.safetensors"
-_KEY_RE = re.compile(r"^artifacts/(0|[1-9][0-9]*)/(terminal_latent|state/[A-Za-z][A-Za-z0-9_.-]*)$")
+_KEY_RE = re.compile(r"^artifacts/(0|[1-9][0-9]*)/(terminal_latent|(?:state|static)/[A-Za-z][A-Za-z0-9_.-]*)$")
 _MAX_HEADER = 100_000_000
 
 
@@ -59,7 +61,9 @@ def _read_header(path: Path) -> tuple[dict[str, Any], int]:
     return header, 8 + length
 
 
-def _production_metadata(ids: Sequence[str], entries: Sequence[dict[str, Any]]) -> dict[str, str]:
+def _production_metadata(
+    ids: Sequence[str], entries: Sequence[dict[str, Any]], *, schema_version: str = "1",
+) -> dict[str, str]:
     """Intern shared production inputs, retaining one reference for every UID."""
     contexts: list[dict[str, Any]] = []
     indices: dict[str, int] = {}
@@ -74,21 +78,25 @@ def _production_metadata(ids: Sequence[str], entries: Sequence[dict[str, Any]]) 
             contexts.append(context)
         references.append(indices[canonical])
     return {
-        "schema_version": "1", "ids": json.dumps(list(ids)),
+        "schema_version": schema_version, "ids": json.dumps(list(ids)),
         "entries": json.dumps(references), "contexts": json.dumps(contexts, allow_nan=False),
     }
 
 
-def _inspect(path: Path, steps: int) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...], tuple[dict[str, Any], ...]]:
+def _inspect(path: Path, steps: int) -> tuple[
+    tuple[str, ...], tuple[tuple[str, ...], ...], tuple[dict[str, Any], ...], _CollectionIntegrity,
+]:
     """Validate every entry's structure without materializing its tensors."""
     try:
         header, _ = _read_header(path)
         with safe_open(str(path), framework="pt", device="cpu") as saved:
             metadata = saved.metadata()
-            if not metadata or metadata.get("schema_version") != "1":
-                raise ValueError("Unsupported inversion artifact schema; regenerate with diffuse for schema v1")
-            if set(metadata) != {"schema_version", "ids", "entries", "contexts"}:
+            if not metadata or metadata.get("schema_version") not in {"1", "2"}:
+                raise ValueError("Unsupported inversion artifact schema; regenerate with diffuse")
+            required = {"schema_version", "ids", "entries", "contexts"}
+            if not required <= metadata.keys() or metadata.keys() - required - {"checksums"}:
                 raise ValueError("Collection metadata must contain schema_version, ids, entries, and contexts")
+            integrity = _CollectionIntegrity(metadata, saved.keys())
             ids = json.loads(metadata["ids"])
             if (not isinstance(ids, list) or not ids
                     or any(not isinstance(uid, str) or not uid.strip() for uid in ids)
@@ -127,12 +135,16 @@ def _inspect(path: Path, steps: int) -> tuple[tuple[str, ...], tuple[tuple[str, 
                     if len(shape) != 4 or shape[:2] != [1, 4] or min(shape[2:]) < 1 or not floating:
                         raise ValueError(f"Invalid terminal latent at position {index}")
                     terminals.add(index)
-                elif not shape or shape[0] != steps:
+                elif match[2].startswith("state/") and (not shape or shape[0] != steps):
                     raise ValueError(f"Invalid per-step state at position {index}")
+                elif match[2].startswith("static/") and (
+                    metadata["schema_version"] != "2" or not shape or min(shape) < 1
+                ):
+                    raise ValueError(f"Invalid static state at position {index}")
                 keys[index].append(key)
             if terminals != set(range(len(ids))):
                 raise ValueError("Every collection ID must have exactly one terminal latent")
-            return tuple(ids), tuple(tuple(entry) for entry in keys), tuple(entries)
+            return tuple(ids), tuple(tuple(entry) for entry in keys), tuple(entries), integrity
     except (OSError, ValueError, TypeError, KeyError) as exc:
         raise ValueError(f"Invalid inversion artifact collection at {path}: {exc}") from exc
     except Exception as exc:
@@ -172,7 +184,10 @@ class ArtifactCollection:
         group = ArtifactGroup.from_path(self.path)
         self.method_id = group.method_id
         self.parameters = group.parameters
-        self.ids, self._keys, self._entries = _inspect(self.path, self.parameters["num_inference_steps"])
+        self._identity = self._file_identity()
+        self.ids, self._keys, self._entries, self._integrity = _inspect(
+            self.path, self.parameters["num_inference_steps"],
+        )
         if any(entry["method_id"] != self.method_id for entry in self._entries):
             raise ValueError("Saved artifact methods do not match their collection directory")
         if any(entry["provenance"] is not None
@@ -180,12 +195,29 @@ class ArtifactCollection:
                and entry["provenance"]["guidance_scale"] != self.parameters["guidance_scale"]
                for entry in self._entries):
             raise ValueError("Saved artifact guidance does not match its collection directory")
+        if any(entry["provenance"] is not None
+               and entry["provenance"]["method_h_params"] is not None
+               and entry["provenance"]["method_h_params"]["inversion_guidance_scale"]
+               != self.parameters["guidance_scale"] for entry in self._entries):
+            raise ValueError("Saved method inversion guidance does not match its collection directory")
         self._positions = {uid: index for index, uid in enumerate(self.ids)}
-        self._identity = self._file_identity()
+        self._integrity_verified = False
+        if self._file_identity() != self._identity:
+            raise ValueError("Artifact collection changed while inspecting it")
 
     def _file_identity(self) -> tuple[int, ...]:
         stat = self.path.stat()
         return stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino
+
+    def validate_integrity(self, *, expected_checksum: str | None = None) -> None:
+        """Verify the complete merge base, including records outside the selected prefix."""
+        if self._file_identity() != self._identity:
+            raise ValueError("Artifact collection changed; reopen it before loading")
+        if not self._integrity_verified:
+            self._integrity.verify_file(self.path, expected_checksum=expected_checksum)
+            if self._file_identity() != self._identity:
+                raise ValueError("Artifact collection changed during integrity verification")
+            self._integrity_verified = True
 
     @property
     def references(self) -> tuple[ArtifactReference, ...]:
@@ -206,6 +238,8 @@ class ArtifactCollection:
         """Parse the native header once for a batch; close mappings before publication."""
         if self._file_identity() != self._identity:
             raise ValueError("Artifact collection changed; reopen it before loading")
+        if not self._integrity.has_checksums:
+            self.validate_integrity()
         resources = ExitStack()
         reader: _ArtifactCollectionReader | None = None
         error: BaseException | None = None
@@ -245,15 +279,21 @@ class ArtifactCollection:
         prefix = f"artifacts/{reference.index}/"
         try:
             # Detach loaded batches from file mappings before Windows replacement.
-            tensors = {key[len(prefix):]: saved.get_tensor(key).clone()
-                       for key in self._keys[reference.index]}
+            tensors = {}
+            for key in self._keys[reference.index]:
+                tensor = saved.get_tensor(key).clone()
+                self._integrity.verify_tensor(key, tensor)
+                tensors[key[len(prefix):]] = tensor
             metadata = dict(self._entries[reference.index])
             provenance = metadata.pop("provenance")
             artifact = InversionArtifact(
                 **metadata,
                 provenance=None if provenance is None else ArtifactProvenance(**provenance),
                 terminal_latent=tensors.pop("terminal_latent"),
-                per_step_state={key[len("state/"):]: tensor for key, tensor in tensors.items()},
+                per_step_state={key[len("state/"):]: tensor for key, tensor in tensors.items()
+                                if key.startswith("state/")},
+                static_state={key[len("static/"):]: tensor for key, tensor in tensors.items()
+                              if key.startswith("static/")},
             )
             artifact.validate_settings(settings, steps=self.parameters["num_inference_steps"])
             return artifact
@@ -273,10 +313,15 @@ class ArtifactCollection:
             artifact.validate()
             values = {"terminal_latent": artifact.terminal_latent}
             values.update({f"state/{key}": tensor for key, tensor in artifact.per_step_state.items()})
+            values.update({f"static/{key}": tensor for key, tensor in artifact.static_state.items()})
             tensors.update({f"artifacts/{index}/{key}": tensor.detach().cpu().contiguous().clone()
                             for key, tensor in values.items()})
-        save_file(tensors, str(path), metadata=_production_metadata(
+        metadata = _production_metadata(
             ids, [artifact.metadata() for artifact in artifacts],
+            schema_version="2" if any(artifact.static_state for artifact in artifacts) else "1",
+        )
+        save_file(tensors, str(path), metadata=_CollectionIntegrity.with_checksums(
+            metadata, {key: tensor_checksum(tensor) for key, tensor in tensors.items()},
         ))
         return tuple(ArtifactReference(path, index, uid) for index, uid in enumerate(ids))
 
@@ -293,14 +338,20 @@ class ArtifactCollection:
         }
         entries = []
         payloads = []
+        checksums = {}
+        identities = {}
         offset = 0
         for index, reference in enumerate(references):
             if reference.path not in headers:
-                source_ids, keys, source_entries = _inspect(reference.path, steps)
+                stat = reference.path.stat()
+                identities[reference.path] = (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino)
+                source_ids, keys, source_entries, integrity = _inspect(reference.path, steps)
+                if not integrity.has_checksums:
+                    integrity.verify_file(reference.path)
                 header, start = _read_header(reference.path)
-                headers[reference.path] = (header, start, source_ids, source_entries)
+                headers[reference.path] = (header, start, source_ids, source_entries, integrity)
                 source_keys[reference.path] = keys
-            header, start, source_ids, source_entries = headers[reference.path]
+            header, start, source_ids, source_entries, integrity = headers[reference.path]
             if reference.index >= len(source_ids) or source_ids[reference.index] != reference.sample_uid:
                 raise ValueError("Source reference does not match its ID list")
             entries.append(source_entries[reference.index])
@@ -310,13 +361,18 @@ class ArtifactCollection:
                 descriptor = header[key]
                 begin, end = descriptor["data_offsets"]
                 length = end - begin
-                output[f"artifacts/{index}/{key[len(prefix):]}"] = {
+                output_key = f"artifacts/{index}/{key[len(prefix):]}"
+                output[output_key] = {
                     "dtype": descriptor["dtype"], "shape": descriptor["shape"],
                     "data_offsets": [offset, offset + length],
                 }
+                checksums[output_key] = integrity.checksums[key]
                 payloads.append((reference.path, start + begin, length))
                 offset += length
-        output["__metadata__"] = _production_metadata(ids, entries)
+        schema_version = "2" if any("/static/" in key for key in output) else "1"
+        output["__metadata__"] = _CollectionIntegrity.with_checksums(
+            _production_metadata(ids, entries, schema_version=schema_version), checksums,
+        )
         encoded = json.dumps(output, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         encoded += b" " * (-len(encoded) % 8)
         if len(encoded) > _MAX_HEADER:
@@ -345,4 +401,9 @@ class ArtifactCollection:
                     source.close()
             destination.flush()
             os.fsync(destination.fileno())
-        _inspect(path, steps)
+        for source_path, identity in identities.items():
+            stat = source_path.stat()
+            if (stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino) != identity:
+                raise ValueError("Source collection changed during assembly")
+        _, _, _, integrity = _inspect(path, steps)
+        integrity.verify_file(path)

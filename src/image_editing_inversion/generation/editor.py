@@ -129,6 +129,8 @@ class Editor:
         prompt_to_prompt_class: type[PromptToPrompt] = PromptToPrompt,
         method_settings: Mapping[str, Any] | None = None,
         batch_hook: BatchedDenoisingHook | None = None,
+        source_prompt_embeddings: torch.Tensor | None = None,
+        source_negative_prompt_embeddings: torch.Tensor | None = None,
     ) -> list[EditResult]:
         """Denoise up to ``runtime.batch_size`` source/target pairs together."""
         error: BaseException | None = None
@@ -137,6 +139,8 @@ class Editor:
                 samples, artifacts, hooks,
                 prompt_to_prompt_class=prompt_to_prompt_class,
                 method_settings=method_settings, batch_hook=batch_hook,
+                source_prompt_embeddings=source_prompt_embeddings,
+                source_negative_prompt_embeddings=source_negative_prompt_embeddings,
             )
         except BaseException as exc:
             error = exc
@@ -158,6 +162,8 @@ class Editor:
         prompt_to_prompt_class: type[PromptToPrompt],
         method_settings: Mapping[str, Any] | None,
         batch_hook: BatchedDenoisingHook | None,
+        source_prompt_embeddings: torch.Tensor | None,
+        source_negative_prompt_embeddings: torch.Tensor | None,
     ) -> list[EditResult]:
         """Execute editing inside the public method's model cleanup boundary."""
         batch_size = len(samples)
@@ -225,9 +231,24 @@ class Editor:
             device=self.device,
             settings=validated_settings,
         )
-        prompts = source_prompts + target_prompts
-        prompt_embeddings = self.encode_prompts(prompts)
-        negative_prompt_embeddings = self.empty_prompt_embeddings(2 * batch_size)
+        if (source_prompt_embeddings is None) != (source_negative_prompt_embeddings is None):
+            raise ValueError("Provide both saved source embedding tensors or neither")
+        if source_prompt_embeddings is None:
+            prompt_embeddings = self.encode_prompts(source_prompts + target_prompts)
+            negative_prompt_embeddings = self.empty_prompt_embeddings(2 * batch_size)
+        else:
+            expected = (batch_size, max_length, self.pipeline.text_encoder.config.hidden_size)
+            for label, tensor in (("conditional", source_prompt_embeddings),
+                                  ("unconditional", source_negative_prompt_embeddings)):
+                if (not isinstance(tensor, torch.Tensor) or tuple(tensor.shape) != expected
+                        or tensor.dtype != self.dtype or not torch.isfinite(tensor).all().item()):
+                    raise ValueError(f"Saved source {label} embeddings must have shape {expected}, dtype {self.dtype}, and finite values")
+            prompt_embeddings = torch.cat((
+                self.to_device(source_prompt_embeddings), self.encode_prompts(target_prompts),
+            ))
+            negative_prompt_embeddings = torch.cat((
+                self.to_device(source_negative_prompt_embeddings), self.empty_prompt_embeddings(batch_size),
+            ))
         base_latents = self.to_device(
             torch.cat([artifact.terminal_latent for artifact in artifacts]), dtype=self.dtype,
         )
@@ -236,11 +257,19 @@ class Editor:
             torch.cat((base_latents, base_latents)), prompt_embeddings,
             negative_prompt_embeddings, hooks, batch_hook, controller,
         )
+        if not torch.isfinite(latents).all().item():
+            raise ValueError("Denoising produced non-finite final latents")
 
+        vae_latents = latents / self.pipeline.vae.config.scaling_factor
+        if not torch.isfinite(vae_latents).all().item():
+            raise ValueError("VAE decoding inputs contain non-finite latents")
         decoded = self.pipeline.vae.decode(
-            latents / self.pipeline.vae.config.scaling_factor,
+            vae_latents,
             return_dict=False,
         )[0]
+        # Postprocessing clamps infinities to finite values, so check raw pixels first.
+        if not torch.isfinite(decoded).all().item():
+            raise ValueError("Image decoding produced non-finite raw RGB pixels")
         images = self.pipeline.image_processor.postprocess(
             decoded, output_type="pt"
         )

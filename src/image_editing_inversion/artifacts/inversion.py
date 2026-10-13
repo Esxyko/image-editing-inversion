@@ -87,6 +87,7 @@ class ArtifactProvenance:
     method_parameters: Mapping[str, Any] | None = None
     guidance_scale: float | None = None
     model_commit: str | None = None
+    method_h_params: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model_content", _json_object(self.model_content, "model_content"))
@@ -99,11 +100,28 @@ class ArtifactProvenance:
             raise ValueError("dataset_content must be a SHA-256 digest or None")
         if self.method_parameters is not None:
             object.__setattr__(self, "method_parameters", _json_object(self.method_parameters, "method_parameters"))
+        if self.method_h_params is not None:
+            settings = _json_object(self.method_h_params, "method_h_params")
+            for name in ("inversion_guidance_scale", "editing_guidance_scale"):
+                value = settings.get(name)
+                if (isinstance(value, bool) or not isinstance(value, (int, float))
+                        or not math.isfinite(value) or value < 0):
+                    raise ValueError(f"Saved method_h_params.{name} must be finite and nonnegative")
+            object.__setattr__(self, "method_h_params", settings)
         if self.guidance_scale is not None:
             if (isinstance(self.guidance_scale, bool)
                     or not isinstance(self.guidance_scale, (int, float))
                     or not math.isfinite(self.guidance_scale) or self.guidance_scale < 0):
                 raise ValueError("Saved guidance_scale must be finite and nonnegative")
+            if (self.method_h_params is not None
+                    and self.guidance_scale != self.method_h_params["inversion_guidance_scale"]):
+                raise ValueError("Saved guidance_scale must match method inversion guidance")
+
+    def validate_method_h_params(self, expected: Mapping[str, Any]) -> None:
+        if self.method_h_params is None:
+            raise ArtifactCompatibilityError("Artifact lacks complete method hyperparameters; regenerate it")
+        if self.method_h_params != _json_object(expected, "expected method_h_params"):
+            raise ArtifactCompatibilityError("Artifact method hyperparameters do not match this run")
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +169,7 @@ class InversionArtifact:
     terminal_latent: torch.Tensor
     per_step_state: Mapping[str, torch.Tensor] = field(default_factory=dict)
     provenance: ArtifactProvenance | None = None
+    static_state: Mapping[str, torch.Tensor] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.method_id = _required_string(self.method_id, "method_id")
@@ -191,6 +210,14 @@ class InversionArtifact:
                 raise ValueError(
                     f"per_step_state[{key!r}] must have one entry per timestep"
                 )
+        if not isinstance(self.static_state, Mapping):
+            raise ValueError("static_state must be a mapping")
+        for key, tensor in self.static_state.items():
+            if not isinstance(key, str) or not _STATE_KEY_RE.fullmatch(key):
+                raise ValueError("Invalid static_state tensor name")
+            if (not isinstance(tensor, torch.Tensor) or tensor.ndim == 0
+                    or min(tensor.shape) < 1 or not torch.isfinite(tensor).all().item()):
+                raise ValueError(f"static_state[{key!r}] must be a nonempty finite tensor")
 
     def validate_terminal_latent(self) -> None:
         """Reject malformed or non-finite terminal state without loading other entries."""
@@ -243,9 +270,11 @@ class InversionArtifact:
             raise ValueError("Saved eta must be finite and nonnegative")
         if value["provenance"] is not None:
             provenance = value["provenance"]
-            if not isinstance(provenance, dict) or set(provenance) != {
+            required = {
                 "model_content", "dataset_content", "numerics", "method_parameters", "guidance_scale", "model_commit",
-            }:
+            }
+            if (not isinstance(provenance, dict) or not required <= provenance.keys()
+                    or provenance.keys() - required - {"method_h_params"}):
                 raise ValueError("Invalid artifact provenance fields")
             value["provenance"] = asdict(ArtifactProvenance(**provenance))
         return value

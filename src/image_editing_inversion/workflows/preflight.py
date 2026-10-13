@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable, Sequence
 
@@ -21,16 +22,25 @@ class SweepPreflight:
         self._configs = configs
         self._methods = methods
         self._sweep_output = output
+        self.method_configs: dict[tuple[Path, str], ExperimentConfig] = {}
 
-    def configuration(self) -> None:
+    def configuration(self, *, inversion: bool = True) -> None:
         errors: list[tuple[Path, str, str]] = []
         for path, config in self._configs:
             for method in self._methods:
-                for check in (
-                    lambda: method.validate_inversion_config(config),
-                    lambda: ReplayPreparer.check_batch_size(method, config),
-                    lambda: ReplayPreparer.policy_for(method, config),
-                ):
+                try:
+                    bound = replace(config, method_h_params=dict(method.method_h_params(config)))
+                    self.method_configs[path, method.method_id] = bound
+                except Exception as exc:
+                    errors.append((path, method.method_id, str(exc)))
+                    continue
+                checks = [
+                    lambda: ReplayPreparer.check_batch_size(method, bound),
+                    lambda: ReplayPreparer.policy_for(method, bound),
+                ]
+                if inversion:
+                    checks.insert(0, lambda: method.validate_inversion_config(bound))
+                for check in checks:
                     try:
                         check()
                     except Exception as exc:
@@ -42,7 +52,8 @@ class SweepPreflight:
         self, activate: Callable[[Path, ExperimentConfig], None],
         context_for: Callable[[], InversionContext],
     ) -> None:
-        first_path, first_config = self._configs[0]
+        first_path = self._configs[0][0]
+        first_config = self.method_configs[first_path, self._methods[0].method_id]
         try:
             activate(first_path, first_config)
             context_for()
@@ -50,15 +61,11 @@ class SweepPreflight:
             self._fail([(path, method.method_id, str(exc))
                         for path, _ in self._configs for method in self._methods])
         errors: list[tuple[Path, str, str]] = []
-        for path, config in self._configs:
-            try:
-                activate(path, config)
-                context = context_for()
-            except Exception as exc:
-                errors.extend((path, method.method_id, str(exc)) for method in self._methods)
-                continue
+        for path, _ in self._configs:
             for method in self._methods:
                 try:
+                    activate(path, self.method_configs[path, method.method_id])
+                    context = context_for()
                     method.validate_inversion_context(context)
                 except Exception as exc:
                     errors.append((path, method.method_id, str(exc)))
@@ -73,7 +80,7 @@ class SweepPreflight:
         reasons: dict[tuple[str, str], list[str]] = {}
         for path, method_id, reason in errors:
             reasons.setdefault((path.name, method_id), []).append(reason)
-        message = "Inversion preflight failed:\n" + "\n".join(
+        message = "Method preflight failed:\n" + "\n".join(
             f"- {filename} / {method_id}: {'; '.join(messages)}"
             for (filename, method_id), messages in reasons.items()
         )

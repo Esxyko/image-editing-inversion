@@ -53,36 +53,38 @@ def validate_ddim_scheduler(config: Mapping[str, Any], label: str) -> None:
 
 def guidance_state(context: InversionContext) -> torch.Tensor:
     return torch.full(
-        (len(context.editor.expected_timesteps),), context.config.sampling.guidance_scale,
+        (len(context.editor.expected_timesteps),), context.config.inversion_guidance_scale,
         dtype=torch.float64, device="cpu",
     )
 
 
 def validate_guidance_state(
     artifact: InversionArtifact, label: str, *, null_text: bool = False,
+    state_key: str = GUIDANCE_KEY,
 ) -> float:
-    guidance = artifact.per_step_state[GUIDANCE_KEY]
+    guidance = artifact.per_step_state[state_key]
     if (not isinstance(guidance, torch.Tensor) or not guidance.is_floating_point()
             or tuple(guidance.shape) != (len(artifact.timesteps),) or not artifact.timesteps):
-        raise ValueError(f"{label} guidance_scale must be a floating [timesteps] tensor")
+        raise ValueError(f"{label} {state_key} must be a floating [timesteps] tensor")
     require_finite(guidance, "saved guidance scale", label.removesuffix(" inversion"))
     scale = float(guidance[0].item())
-    if (scale <= 1 if null_text else scale < 0) or not torch.all(guidance == guidance[0]).item():
-        bound = "greater than 1" if null_text else "nonnegative"
-        raise ValueError(f"{label} guidance_scale must be constant and {bound}")
+    if (scale < 1 if null_text else scale < 0) or not torch.all(guidance == guidance[0]).item():
+        bound = "at least 1" if null_text else "nonnegative"
+        raise ValueError(f"{label} {state_key} must be constant and {bound}")
     return scale
 
 
 def validate_guidance_compatibility(
     guidance: float, context: InversionContext, label: str,
 ) -> None:
-    if not math.isclose(guidance, context.config.sampling.guidance_scale, rel_tol=0, abs_tol=1e-9):
+    if not math.isclose(guidance, context.config.inversion_guidance_scale, rel_tol=0, abs_tol=1e-9):
         raise ArtifactCompatibilityError(f"{label} artifact guidance scale does not match this run")
 
 
 def build_artifact(
     method_id: str, context: InversionContext, uid: str, terminal_latent: torch.Tensor,
     per_step_state: Mapping[str, torch.Tensor] | None = None,
+    *, static_state: Mapping[str, torch.Tensor] | None = None,
 ) -> InversionArtifact:
     def copy(tensor: torch.Tensor) -> torch.Tensor:
         return tensor.detach().to(device="cpu").clone().contiguous()
@@ -95,6 +97,7 @@ def build_artifact(
         eta=context.config.sampling.eta, timesteps=context.editor.expected_timesteps,
         terminal_latent=copy(terminal_latent),
         per_step_state={name: copy(tensor) for name, tensor in (per_step_state or {}).items()},
+        static_state={name: copy(tensor) for name, tensor in (static_state or {}).items()},
     )
 
 

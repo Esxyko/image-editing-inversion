@@ -6,7 +6,7 @@ https://github.com/cure-lab/PnPInversion
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
 
@@ -14,6 +14,7 @@ import torch
 
 from ...artifacts import InversionArtifact
 from ...config import ExperimentConfig
+from ...config.method_parameters import MethodGuidanceSettings
 from ..base import InversionMethod
 from ..context import InversionContext
 from ..components import prepare_sources, conditional_pivots
@@ -25,6 +26,10 @@ from .common import (
     GUIDANCE_KEY as _GUIDANCE_KEY, build_artifact, guidance_state,
     require_finite, validate_ddim_scheduler,
     validate_guidance_compatibility, validate_guidance_state,
+)
+from .source_embeddings import (
+    SOURCE_EMBEDDING_VERSION, reject_trajectory_overwrite, replay_source_embeddings,
+    source_embedding_state, validate_source_embeddings,
 )
 
 if TYPE_CHECKING:
@@ -38,6 +43,8 @@ _validate_scheduler = partial(validate_ddim_scheduler, label="Direct")
 
 def _artifact_state(artifact: InversionArtifact) -> tuple[torch.Tensor, float]:
     """Validate residuals without importing Diffusers or loading a model."""
+    reject_trajectory_overwrite(artifact, "Direct")
+    validate_source_embeddings(artifact, "Direct")
     if artifact.method_id != "direct-inversion":
         raise ValueError("Direct inversion replay requires a direct-inversion artifact")
     if artifact.scheduler_id != "ddim" or artifact.eta != 0:
@@ -117,12 +124,20 @@ class _DirectInversionBatchHook(_ArtifactBatchHook):
 class DirectInversion(InversionMethod):
     """Invert source batches and record each image's reconstruction residuals."""
 
+    def __init__(self) -> None:
+        self._settings: MethodGuidanceSettings | None = None
+
+    def method_h_params(self, config: ExperimentConfig) -> Mapping[str, Any]:
+        if self._settings is None:
+            self._settings = MethodGuidanceSettings.load(config.project.method_h_params / "Direct.yaml")
+        return asdict(self._settings)
+
     @property
     def method_id(self) -> str:
         return "direct-inversion"
 
     def inversion_cache_parameters(self, context: InversionContext) -> Mapping[str, Any]:
-        return {}
+        return {"source_embedding_version": SOURCE_EMBEDDING_VERSION}
 
     def validate_inversion_config(self, config: ExperimentConfig) -> None:
         validate_sampling(config, "Direct")
@@ -148,6 +163,7 @@ class DirectInversion(InversionMethod):
         self, artifact: InversionArtifact, context: InversionContext
     ) -> None:
         _, guidance_scale = _artifact_state(artifact)
+        validate_source_embeddings(artifact, "Direct", context)
         artifact.validate_compatibility(
             context.config,
             dataset_ref=context.dataset_ref,
@@ -157,6 +173,10 @@ class DirectInversion(InversionMethod):
         )
         validate_guidance_compatibility(guidance_scale, context, "Direct inversion")
         self._validate_context(context)
+
+    def replay_source_embeddings(self, artifacts: Sequence[InversionArtifact],
+                                 context: InversionContext) -> tuple[torch.Tensor, torch.Tensor] | None:
+        return replay_source_embeddings(artifacts, "Direct", context)
 
     def create_denoising_hook(self, artifact: InversionArtifact) -> DenoisingHook:
         return _DirectInversionHook(artifact)
@@ -175,7 +195,7 @@ class DirectInversion(InversionMethod):
         context: InversionContext,
     ) -> torch.Tensor:
         editor = context.editor
-        scale = context.config.sampling.guidance_scale
+        scale = context.config.inversion_guidance_scale
         latent = editor.to_device(pivots[-1], dtype=editor.dtype)
         offsets: list[torch.Tensor] = []
         for step_index, timestep in enumerate(editor.scheduler.timesteps):
@@ -222,12 +242,13 @@ class DirectInversion(InversionMethod):
             embeddings = sources.embeddings
             pivots = conditional_pivots(sources, uids, inverse_scheduler, context, "Direct")
             offsets = self._calculate_offsets(pivots, embeddings, context)
+            encodings = source_embedding_state(embeddings)
             artifacts: list[InversionArtifact] = []
             for index, uid in enumerate(uids):
                 artifact = build_artifact(self.method_id, context, uid, pivots[-1][index:index + 1], {
                     _OFFSETS_KEY: offsets[:, index:index + 1],
                     _GUIDANCE_KEY: guidance_state(context),
-                })
+                }, static_state=encodings[index])
                 self.validate_replay(artifact, context)
                 artifacts.append(artifact)
             return artifacts

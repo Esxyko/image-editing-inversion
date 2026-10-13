@@ -33,14 +33,12 @@ class ModelConfig:
 class SamplingConfig:
     num_inference_steps: int
     eta: float
-    guidance_scale: float
     seed: int
 
     def __post_init__(self) -> None:
         integer(self.num_inference_steps, "sampling.num_inference_steps", minimum=1)
         integer(self.seed, "sampling.seed")
-        for name in ("eta", "guidance_scale"):
-            object.__setattr__(self, name, number(getattr(self, name), f"sampling.{name}"))
+        object.__setattr__(self, "eta", number(self.eta, "sampling.eta"))
         if self.eta > 1:
             raise ConfigError("sampling.eta must be <= 1 for the DDIM scheduler")
 
@@ -141,6 +139,7 @@ class ExperimentConfig:
     prompt_to_prompt: PromptToPromptConfig
     runtime: RuntimeConfig
     methods: dict[str, MethodConfig] = field(default_factory=dict)
+    method_h_params: dict[str, Any] | None = None
     project: ProjectPaths = field(default_factory=project_paths, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -157,6 +156,37 @@ class ExperimentConfig:
                 raise ConfigError("methods must contain unique IDs mapped to MethodConfig")
             methods[key] = value
         object.__setattr__(self, "methods", methods)
+        if self.method_h_params is not None:
+            settings = self.method_h_params
+            if not isinstance(settings, dict) or any(not isinstance(key, str) for key in settings):
+                raise ConfigError("method_h_params must be a mapping with string keys")
+            try:
+                settings = json.loads(json.dumps(settings, allow_nan=False))
+            except (TypeError, ValueError) as exc:
+                raise ConfigError("method_h_params must contain JSON-compatible values") from exc
+            for name in ("inversion_guidance_scale", "editing_guidance_scale"):
+                if name not in settings:
+                    raise ConfigError(f"method_h_params is missing {name}")
+                settings[name] = number(settings[name], f"method_h_params.{name}")
+            object.__setattr__(self, "method_h_params", settings)
+
+    def require_method_h_params(self) -> dict[str, Any]:
+        """Reject model execution before one method's parameters are bound."""
+        if self.method_h_params is None:
+            raise ConfigError("Bind method_h_params before executing inversion or editing")
+        return deepcopy(self.method_h_params)
+
+    @property
+    def inversion_guidance_scale(self) -> float:
+        if self.method_h_params is None:
+            raise ConfigError("Bind method_h_params before executing inversion or editing")
+        return self.method_h_params["inversion_guidance_scale"]
+
+    @property
+    def editing_guidance_scale(self) -> float:
+        if self.method_h_params is None:
+            raise ConfigError("Bind method_h_params before executing inversion or editing")
+        return self.method_h_params["editing_guidance_scale"]
 
     def method_prompt_to_prompt(self, method_id: str) -> dict[str, Any]:
         """Return the extra P2P settings for one registered inversion method."""
@@ -168,7 +198,10 @@ class ExperimentConfig:
         return {
             name: asdict(getattr(self, name))
             for name in ("model", "sampling", "prompt_to_prompt", "runtime")
-        } | {"methods": {key: asdict(value) for key, value in self.methods.items()}}
+        } | {
+            "methods": {key: asdict(value) for key, value in self.methods.items()},
+            "method_h_params": deepcopy(self.method_h_params),
+        }
 
     def validate_hardware(self) -> None:
         self.runtime.validate_hardware()

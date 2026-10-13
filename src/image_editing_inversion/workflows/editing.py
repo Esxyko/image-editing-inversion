@@ -81,6 +81,11 @@ class EditingCoordinator:
             with timing.measure("editor", device=context.editor.device):
                 artifacts = [item.prepared.loaded.artifact for item in items]
                 batch_hook = policy.method.create_batch_denoising_hook(artifacts)
+                source_embeddings = policy.method.replay_source_embeddings(artifacts, context)
+                embedding_options = {} if source_embeddings is None else {
+                    "source_prompt_embeddings": source_embeddings[0],
+                    "source_negative_prompt_embeddings": source_embeddings[1],
+                }
                 edited = context.editor.edit_batch(
                     [item.prepared.loaded.sample for item in items],
                     artifacts,
@@ -88,6 +93,7 @@ class EditingCoordinator:
                     batch_hook=batch_hook,
                     prompt_to_prompt_class=policy.policy_class,
                     method_settings=policy.settings,
+                    **embedding_options,
                 )
             batch_seconds += timing.durations["editor"]
             if len(edited) != len(items):

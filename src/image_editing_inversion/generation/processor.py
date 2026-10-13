@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from typing import Any
 
 from diffusers.models.attention_processor import AttnProcessor, AttnProcessor2_0
@@ -18,7 +19,8 @@ class _PromptToPromptProcessor:
     unconditional target, conditional source, and conditional target. As in the
     reference implementation, self-attention sharing is limited to at most
     16 x 16 spatial tokens; higher-resolution self-attention uses its original
-    processor. Active attention maps are computed in query chunks.
+    processor. Uncontrolled branches retain the original processor's outputs;
+    active attention maps are computed in query chunks only for target transfer.
     """
 
     def __init__(
@@ -62,6 +64,41 @@ class _PromptToPromptProcessor:
             else branch_mask[:, start:end, :]
         )
 
+    def _native_attention_with_projections(
+        self,
+        attn: Any,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor | None,
+        attention_mask: torch.Tensor | None,
+        temb: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Reuse native Q/K/V without changing its batch or numerical path."""
+        projections: dict[str, torch.Tensor] = {}
+
+        def capture(name: str):
+            def record(
+                module: Any, inputs: tuple[Any, ...], output: torch.Tensor,
+            ) -> None:
+                projections[name] = output
+
+            return record
+
+        # Scope observers to one native call, including its failure path. They
+        # retain the actual tensors without copying or modifying module outputs.
+        with ExitStack() as observers:
+            for name in ("to_q", "to_k", "to_v"):
+                handle = getattr(attn, name).register_forward_hook(capture(name))
+                observers.callback(handle.remove)
+            original_output = self.original(
+                attn, hidden_states, encoder_hidden_states, attention_mask, temb,
+            )
+        if len(projections) != 3:
+            raise ValueError("Native attention did not expose all Q/K/V projections")
+        return (
+            original_output, projections["to_q"], projections["to_k"],
+            projections["to_v"],
+        )
+
     def __call__(
         self,
         attn: Any,
@@ -90,32 +127,23 @@ class _PromptToPromptProcessor:
         if self.is_cross != (encoder_hidden_states is not None):
             raise ValueError("Unexpected SD 1.5 attention layer type")
 
-        residual = hidden_states
-        if attn.spatial_norm is not None:
-            hidden_states = attn.spatial_norm(hidden_states, temb)
-        input_ndim = hidden_states.ndim
-        if input_ndim == 4:
-            batch_size, channels, height, width = hidden_states.shape
-            hidden_states = hidden_states.view(batch_size, channels, height * width).transpose(1, 2)
-        elif input_ndim == 3:
-            batch_size = hidden_states.shape[0]
-        else:
+        if hidden_states.ndim not in (3, 4):
             raise ValueError("Unsupported attention hidden-state rank")
         pairs = self.controller.batch_size
+        batch_size = hidden_states.shape[0]
         if batch_size != 4 * pairs:
             raise ValueError(
                 f"Prompt-to-Prompt expected {4 * pairs} UNet branches, got {batch_size}"
             )
-
-        if attn.group_norm is not None:
-            hidden_states = attn.group_norm(hidden_states.transpose(1, 2)).transpose(1, 2)
-        query = attn.to_q(hidden_states)
-        if encoder_hidden_states is None:
-            encoder_hidden_states = hidden_states
-        elif attn.norm_cross:
-            encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
-        key = attn.to_k(encoder_hidden_states)
-        value = attn.to_v(encoder_hidden_states)
+        # Keep the native attention, normalization, projection and residual path
+        # for both unconditional branches and the conditional source branch.
+        original_output, query, key, value = self._native_attention_with_projections(
+            attn, hidden_states, encoder_hidden_states, attention_mask, temb,
+        )
+        residual = hidden_states[3 * pairs:]
+        input_ndim = hidden_states.ndim
+        if input_ndim == 4:
+            batch_size, channels, height, width = hidden_states.shape
         heads = attn.heads
         query = query.view(batch_size, -1, heads, query.shape[-1] // heads).transpose(1, 2)
         key = key.view(batch_size, -1, heads, key.shape[-1] // heads).transpose(1, 2)
@@ -132,15 +160,9 @@ class _PromptToPromptProcessor:
         else:
             prepared_mask = None
         output = torch.empty(
-            (*query.shape[:-1], value.shape[-1]),
+            (pairs, *query.shape[1:-1], value.shape[-1]),
             device=query.device,
             dtype=value.dtype,
-        )
-        # The unconditional branches are never edited by Prompt-to-Prompt.
-        output[: 2 * pairs] = F.scaled_dot_product_attention(
-            query[: 2 * pairs], key[: 2 * pairs], value[: 2 * pairs],
-            attn_mask=None if prepared_mask is None else prepared_mask[: 2 * pairs],
-            dropout_p=0.0, is_causal=False, scale=attn.scale,
         )
 
         query_length = query.shape[-2]
@@ -152,16 +174,17 @@ class _PromptToPromptProcessor:
         else:
             self._custom_attention(query, key, value, prepared_mask, attn.scale, output)
 
-        hidden_states = output.transpose(1, 2).reshape(batch_size, query_length, -1)
+        hidden_states = output.transpose(1, 2).reshape(pairs, query_length, -1)
         hidden_states = attn.to_out[0](hidden_states)
         hidden_states = attn.to_out[1](hidden_states)
         if input_ndim == 4:
             hidden_states = hidden_states.transpose(1, 2).reshape(
-                batch_size, channels, height, width
+                pairs, channels, height, width
             )
         if attn.residual_connection:
             hidden_states = hidden_states + residual
-        return hidden_states / attn.rescale_output_factor
+        target_output = hidden_states / attn.rescale_output_factor
+        return torch.cat((original_output[:3 * pairs], target_output))
 
 
     def _default_self_attention(
@@ -171,11 +194,10 @@ class _PromptToPromptProcessor:
         pairs = self.controller.batch_size
         source = slice(2 * pairs, 3 * pairs)
         source_mask = None if mask is None else mask[source]
-        for branch in (source, slice(3 * pairs, 4 * pairs)):
-            output[branch] = F.scaled_dot_product_attention(
-                query[source], key[source], value[branch], attn_mask=source_mask,
-                dropout_p=0.0, is_causal=False, scale=scale,
-            )
+        output[:] = F.scaled_dot_product_attention(
+            query[source], key[source], value[3 * pairs:], attn_mask=source_mask,
+            dropout_p=0.0, is_causal=False, scale=scale,
+        )
 
     @staticmethod
     def _batch_mask(
@@ -206,7 +228,6 @@ class _PromptToPromptProcessor:
                 target_branches = indices + 3 * pairs
                 source_query = query.index_select(0, source_branches)
                 source_key = key.index_select(0, source_branches)
-                source_value = value.index_select(0, source_branches)
                 target_value = value.index_select(0, target_branches)
                 source_mask = self._batch_mask(mask, source_branches)
                 mapping = group.mapping[offset:offset + pair_limit]
@@ -223,9 +244,6 @@ class _PromptToPromptProcessor:
                         source_query[..., start:end, :], source_key, scale,
                         self._query_mask(source_mask, start, end),
                     )
-                    output[source_branches, :, start:end] = torch.matmul(
-                        source_prob.to(source_value.dtype), source_value,
-                    )
                     if group.mode == "replace":
                         replacement = torch.matmul(source_prob, mapping[:, None])
                     else:
@@ -238,7 +256,7 @@ class _PromptToPromptProcessor:
                         )
                         aligned = source_prob.gather(-1, gather_indices)
                         replacement = alpha * aligned + (1.0 - alpha) * target_prob
-                    output[target_branches, :, start:end] = torch.matmul(
+                    output[indices, :, start:end] = torch.matmul(
                         replacement.to(target_value.dtype), target_value,
                     )
 
@@ -254,16 +272,12 @@ class _PromptToPromptProcessor:
             target_branch = 3 * pairs + pair_index
             source_key = key[source_branch]
             target_key = key[target_branch]
-            source_value = value[source_branch]
             target_value = value[target_branch]
             for start in range(0, query_length, self.query_chunk_size):
                 end = min(start + self.query_chunk_size, query_length)
                 source_prob = self._probabilities(
                     query[source_branch, :, start:end], source_key, scale,
                     self._mask_slice(prepared_mask, source_branch, start, end),
-                )
-                output[source_branch, :, start:end] = torch.bmm(
-                    source_prob.to(source_value.dtype), source_value
                 )
                 if self.is_cross or (
                     type(self.controller).replace_self_attention
@@ -292,6 +306,6 @@ class _PromptToPromptProcessor:
                     raise ValueError(
                         f"Prompt-to-Prompt subclass returned invalid attention at {self.layer_name}"
                     )
-                output[target_branch, :, start:end] = torch.bmm(
+                output[pair_index, :, start:end] = torch.bmm(
                     replacement_prob.to(target_value.dtype), target_value
                 )
