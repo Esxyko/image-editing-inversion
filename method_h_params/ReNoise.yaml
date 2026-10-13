@@ -1,7 +1,6 @@
 # Loaded once per invocation for inversion and artifact replay.
 # Counts are refinements after the initial prediction; averaging ends are exclusive.
 inversion_guidance_scale: 1.25
-editing_guidance_scale: 7.5
 num_renoise_steps: 1
 max_num_renoise_steps_first_step: 1
 average_latent_estimations: true

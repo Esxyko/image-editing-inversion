@@ -84,9 +84,9 @@ class InversionMethod(ABC):
         """Return resolved, JSON-compatible method hyperparameters for run snapshots.
 
         Include defaults and reuse the settings loaded for inversion and replay.
-        Every method exposes separate inversion and target-editing CFG values.
+        Every method exposes inversion CFG; editing CFG belongs to sampling.
         """
-        return {"inversion_guidance_scale": 7.5, "editing_guidance_scale": 7.5}
+        return {"inversion_guidance_scale": 7.5}
 
     def validate_inversion_context(self, context: InversionContext) -> None:
         """Optionally validate the actual scheduler before processing any samples."""

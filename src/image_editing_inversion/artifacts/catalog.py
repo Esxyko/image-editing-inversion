@@ -183,7 +183,9 @@ class ArtifactCatalog:
             if (artifact.provenance is None
                     or artifact.provenance.method_parameters != normalized.get("method_parameters")
                     or artifact.provenance.method_h_params is None
-                    or artifact.provenance.method_h_params != normalized.get("method_h_params")):
+                    or artifact.provenance.method_h_params != normalized.get("method_h_params")
+                    or artifact.provenance.editing_guidance_scale is None
+                    or artifact.provenance.editing_guidance_scale != normalized.get("editing_guidance_scale")):
                 return None
             return artifact, reference
         except (OSError, ValueError, TypeError, KeyError):
@@ -291,6 +293,8 @@ class ArtifactGroupPublication:
                     or artifact.provenance.method_h_params is None
                     or artifact.provenance.method_h_params != cache_inputs.get("method_h_params")
                     or artifact.provenance.method_parameters != cache_inputs.get("method_parameters")
+                    or artifact.provenance.editing_guidance_scale is None
+                    or artifact.provenance.editing_guidance_scale != cache_inputs.get("editing_guidance_scale")
                 ):
                     raise ValueError("Artifact production parameters must match its cache inputs")
                 if artifact.method_id != self.method_id or len(artifact.timesteps) != self.parameters["num_inference_steps"]:

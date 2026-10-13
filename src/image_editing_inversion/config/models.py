@@ -34,11 +34,15 @@ class SamplingConfig:
     num_inference_steps: int
     eta: float
     seed: int
+    editing_guidance_scale: float
 
     def __post_init__(self) -> None:
         integer(self.num_inference_steps, "sampling.num_inference_steps", minimum=1)
         integer(self.seed, "sampling.seed")
         object.__setattr__(self, "eta", number(self.eta, "sampling.eta"))
+        object.__setattr__(self, "editing_guidance_scale", number(
+            self.editing_guidance_scale, "sampling.editing_guidance_scale",
+        ))
         if self.eta > 1:
             raise ConfigError("sampling.eta must be <= 1 for the DDIM scheduler")
 
@@ -164,10 +168,15 @@ class ExperimentConfig:
                 settings = json.loads(json.dumps(settings, allow_nan=False))
             except (TypeError, ValueError) as exc:
                 raise ConfigError("method_h_params must contain JSON-compatible values") from exc
-            for name in ("inversion_guidance_scale", "editing_guidance_scale"):
-                if name not in settings:
-                    raise ConfigError(f"method_h_params is missing {name}")
-                settings[name] = number(settings[name], f"method_h_params.{name}")
+            if "editing_guidance_scale" in settings:
+                raise ConfigError(
+                    "Move method_h_params.editing_guidance_scale to pipeline sampling.editing_guidance_scale"
+                )
+            if "inversion_guidance_scale" not in settings:
+                raise ConfigError("method_h_params is missing inversion_guidance_scale")
+            settings["inversion_guidance_scale"] = number(
+                settings["inversion_guidance_scale"], "method_h_params.inversion_guidance_scale",
+            )
             object.__setattr__(self, "method_h_params", settings)
 
     def require_method_h_params(self) -> dict[str, Any]:
@@ -184,9 +193,7 @@ class ExperimentConfig:
 
     @property
     def editing_guidance_scale(self) -> float:
-        if self.method_h_params is None:
-            raise ConfigError("Bind method_h_params before executing inversion or editing")
-        return self.method_h_params["editing_guidance_scale"]
+        return self.sampling.editing_guidance_scale
 
     def method_prompt_to_prompt(self, method_id: str) -> dict[str, Any]:
         """Return the extra P2P settings for one registered inversion method."""

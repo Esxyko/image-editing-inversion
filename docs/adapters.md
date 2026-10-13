@@ -29,16 +29,19 @@ creating a method's hook.
 
 Override `method_h_params(config)` to expose resolved method hyperparameters in
 each inversion and replay run's `resolved-config.json`. Return a JSON-compatible
-mapping with all defaults, `inversion_guidance_scale`, and `editing_guidance_scale`.
-The default returns both CFG values as `7.5`. Load settings once per adapter
+mapping with all defaults and `inversion_guidance_scale`. Do not include
+`editing_guidance_scale`: it belongs to pipeline `sampling`.
+The default returns inversion CFG as `7.5`. Load settings once per adapter
 invocation and use the same settings for inversion and replay. The workflow binds
 the normalized snapshot into `ExperimentConfig.method_h_params` before preflight
 or model execution. The complete snapshot participates in cache identity and
 replay compatibility in addition to `inversion_cache_parameters(context)`.
 
-`SamplingConfig` no longer contains `guidance_scale`. Algorithms use
-`config.inversion_guidance_scale`; the shared editor applies that CFG to all source
-branches and `config.editing_guidance_scale` to all target branches. Direct callers
+`SamplingConfig` contains required `editing_guidance_scale`, replacing method-owned
+editing CFG; it does not contain the old `guidance_scale`. Algorithms use
+`config.inversion_guidance_scale`; the shared editor uses `config.editing_guidance_scale`
+for source reconstruction and target editing, with hook overrides for source CFG.
+The editing accessor reads `config.sampling.editing_guidance_scale`. Direct callers
 must bind configuration before creating an editor, for example:
 
 ```python
@@ -48,7 +51,8 @@ config = replace(config, method_h_params=dict(method.method_h_params(config)))
 ```
 
 Adapters supplying their own provenance must include the complete bound
-`method_h_params` snapshot. Missing snapshots or any differing hyperparameter
+`method_h_params` snapshot and separate `editing_guidance_scale` from the configuration.
+Missing either field, differing editing CFG, or any differing method hyperparameter
 prevent reuse and replay. The runner attaches provenance when the adapter leaves
 it unset; `method_parameters` continues to describe effective algorithm inputs.
 
@@ -256,9 +260,10 @@ performing inversion or optimization.
 
 | Previous usage | Current usage |
 | --- | --- |
-| Pipeline `sampling.guidance_scale` | Per-method `inversion_guidance_scale` and `editing_guidance_scale` |
-| `SamplingConfig.guidance_scale` | Bound `ExperimentConfig.method_h_params` and CFG accessors |
-| Provenance without complete method parameters | Regenerate with the full `method_h_params` snapshot for reuse/replay |
+| Pipeline `sampling.guidance_scale` | Per-method `inversion_guidance_scale` and pipeline `sampling.editing_guidance_scale` |
+| Method `editing_guidance_scale` | Required pipeline `sampling.editing_guidance_scale`; remove it from method YAML and snapshots |
+| `SamplingConfig.guidance_scale` | Bound method inversion CFG and required `SamplingConfig.editing_guidance_scale`, available through CFG accessors |
+| Provenance without complete method parameters or separate editing CFG | Regenerate with the full `method_h_params` snapshot and `editing_guidance_scale` for reuse/replay |
 | `register_method(YourMethod())` | `register_method("your-method-id", YourMethod)` |
 | Entry point exporting an adapter instance | Export a zero-argument class or factory |
 | `get_method` returning a shared instance | Fresh instance on every call |

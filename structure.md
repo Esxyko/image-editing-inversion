@@ -20,7 +20,10 @@ Configuration and storage locations are fixed relative to `src/`.
 |-- tests/test_direct_source_state.py # CPU original-embedding, native residual and collection compatibility regressions
 |-- pyproject.toml                  # Dependencies, CLI and method entry points
 |-- config.yaml                     # Shared experiment configuration
-|-- pipeline_h_params/default.yaml  # Sampling and attention sweep parameters
+|-- pipeline_h_params/              # Sampling, editing CFG and attention sweep parameters
+|   |-- default.yaml
+|   |-- high_editing_guidance.yaml  # Editing CFG 10.0; other settings match default
+|   `-- low_editing_guidance.yaml   # Editing CFG 5.0; other settings match default
 |-- method_h_params/
 |   |-- DDIM.yaml
 |   |-- Direct.yaml
@@ -34,7 +37,7 @@ Configuration and storage locations are fixed relative to `src/`.
     |-- config/
     |   |-- models.py               # Validated settings and hardware checks
     |   |-- validation.py           # Shared semantic checks and ConfigError
-    |   |-- method_parameters.py    # Shared inversion/editing CFG defaults and loading
+    |   |-- method_parameters.py    # Method inversion CFG defaults and loading
     |   `-- loader.py               # Strict YAML schemas and invocation snapshot
     |-- data/
     |   |-- schema.py, loader.py     # Project eval split contract and loading
@@ -120,7 +123,8 @@ and never import or retain the runner. `ReplayPreparer` uses the session's adapt
 for both fresh inversions and saved artifacts. Stable cache inputs are resolved
 once per method/configuration context and combined with each UID.
 
-Pipeline configuration contains steps and attention fractions, without CFG.
+Pipeline configuration contains steps, required `sampling.editing_guidance_scale`,
+and attention fractions. Method configuration owns inversion CFG and algorithm settings.
 The session binds each pipeline/method combination to a normalized
 `ExperimentConfig.method_h_params` snapshot before preflight or execution and
 reconfigures the shared editor when switching methods. Source denoising uses
@@ -128,10 +132,11 @@ editing CFG for every bundled method. Null-text hooks request their saved
 optimization CFG, which is validated against editing CFG. Null-text optimization
 and target denoising also use editing CFG. Null-text pivots use inversion CFG;
 Direct conditional pivots retain CFG 1.
-Cache identity version 3 includes all method parameters, including both CFG values.
-Saved provenance carries the same complete snapshot; artifacts without it or with
-different current method parameters cannot be reused or replayed. Group directory
-guidance and per-step `guidance_scale` continue to mean inversion CFG.
+Cache identity version 4 includes all method parameters and separate pipeline editing CFG.
+Saved provenance carries the complete method snapshot and `editing_guidance_scale`;
+artifacts without either or with different current settings cannot be reused or replayed.
+Legacy provenance remains readable without automatically migrating editing CFG.
+Group directory guidance and per-step `guidance_scale` continue to mean inversion CFG.
 Null-text separately saves `optimization_guidance_scale`, checks it against
 editing CFG on replay, and versions the optimization rule in cache identity.
 It also saves `pivot_guidance_scale`, validates it against inversion CFG, and

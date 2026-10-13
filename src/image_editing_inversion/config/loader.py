@@ -116,7 +116,7 @@ class ConfigurationLoader:
         data = _read_mapping(path)
         if set(data) != {"sampling", "prompt_to_prompt"}:
             raise ConfigError(f"Pipeline parameters at {path} must contain only sampling and prompt_to_prompt sections")
-        sampling = _section(data, "sampling", {"num_inference_steps"})
+        sampling = _section(data, "sampling", {"num_inference_steps", "editing_guidance_scale"})
         p2p = _section(data, "prompt_to_prompt", {"cross_replace_fraction", "self_replace_fraction"})
         return ExperimentConfig(
             model=self._model,

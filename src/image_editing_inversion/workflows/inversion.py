@@ -47,7 +47,7 @@ class InversionCoordinator:
         if not isinstance(parameters, Mapping):
             raise TypeError("inversion_cache_parameters must return a mapping or None")
         inputs = {
-            "cache_version": 3,
+            "cache_version": 4,
             **context.source_identity(),
             "method_id": method.method_id,
             "scheduler": {
@@ -56,6 +56,7 @@ class InversionCoordinator:
                 "eta": context.config.sampling.eta,
             },
             "guidance_scale": context.config.inversion_guidance_scale,
+            "editing_guidance_scale": context.config.editing_guidance_scale,
             "method_parameters": dict(parameters),
             "method_h_params": context.config.require_method_h_params(),
         }
@@ -79,6 +80,7 @@ class InversionCoordinator:
             artifact.provenance is None
             or artifact.provenance.method_parameters != cache_inputs["method_parameters"]
             or artifact.provenance.method_h_params != cache_inputs["method_h_params"]
+            or artifact.provenance.editing_guidance_scale != cache_inputs["editing_guidance_scale"]
         ):
             raise ValueError("Artifact production parameters do not match its cache inputs")
         self._replay.validate(artifact, method, context)
@@ -166,6 +168,7 @@ class InversionCoordinator:
                                 guidance_scale=context.config.inversion_guidance_scale,
                                 model_commit=context.editor.model_commit,
                                 method_h_params=context.config.require_method_h_params(),
+                                editing_guidance_scale=context.config.editing_guidance_scale,
                             )
                         self.validate(artifact, method, uids[index], context, cache_inputs=inputs[index])
                         resolved[index] = artifact

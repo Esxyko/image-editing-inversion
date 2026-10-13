@@ -21,7 +21,7 @@ def validate_sampling(config: ExperimentConfig, label: str, *, null_text: bool =
         requirement = ">= 1" if null_text else "finite and nonnegative"
         raise ValueError(f"{label} inversion requires method_h_params.inversion_guidance_scale {requirement}")
     if null_text and (not math.isfinite(config.editing_guidance_scale) or config.editing_guidance_scale < 1):
-        raise ValueError(f"{label} optimization requires method_h_params.editing_guidance_scale >= 1")
+        raise ValueError(f"{label} optimization requires sampling.editing_guidance_scale >= 1")
 
 
 def inverse_scheduler(context: InversionContext, label: str) -> DDIMInverseScheduler:

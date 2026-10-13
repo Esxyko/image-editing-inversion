@@ -8,8 +8,10 @@ The dataset mask is reserved for metrics and does not constrain editing.
 
 Every method has its own YAML under `method_h_params/`: `DDIM.yaml`,
 `Direct.yaml`, `Null_text.yaml`, or `ReNoise.yaml`. Each includes
-`inversion_guidance_scale` and `editing_guidance_scale`, both defaulting to `7.5`.
-CFG settings are absent from pipeline parameter files. Both values must be finite
+`inversion_guidance_scale`, defaulting to `7.5` when omitted; the checked-in method
+files use `1.25`. Shared editing CFG is required as `sampling.editing_guidance_scale`
+in every pipeline parameter file; existing presets use `7.5`, while the high/low
+editing-guidance presets use `10.0`/`5.0`. Both values must be finite
 and nonnegative; Null-text requires both CFG values to be at least `1`.
 DDIM and ReNoise inversion and Direct residual calibration use inversion CFG.
 Null-text optimization uses editing CFG; its source reconstruction and target
@@ -17,9 +19,10 @@ editing use that same CFG. All bundled methods reconstruct and edit at editing C
 Null-text DDIM pivots use inversion CFG; Direct conditional pivots retain CFG `1`.
 
 Files are loaded once per invocation, including replay. Complete method parameters,
-with defaults and both CFG values, are saved in provenance and must match the
-current YAML for cache reuse or replay. Even changing editing CFG invalidates
-inversion reuse. Artifacts missing a complete snapshot require regeneration.
+with defaults and inversion CFG, are saved in provenance alongside separate
+pipeline editing CFG and must match the current YAML for cache reuse or replay.
+Even changing editing CFG invalidates inversion reuse. Artifacts missing a
+complete snapshot or separate editing CFG require regeneration.
 Saved per-step `guidance_scale` continues to denote inversion CFG.
 
 The defaults in the tables below are **implementation defaults for omitted keys**.
@@ -83,7 +86,7 @@ encodes the image with the VAE and builds a source-caption DDIM pivot trajectory
 at `inversion_guidance_scale`, combining source conditional and empty-caption
 unconditional predictions. At CFG `1`, only the conditional prediction is needed.
 It then optimizes one unconditional embedding per denoising step
-using the method-specific `editing_guidance_scale` and latent reconstruction MSE. Only
+using the pipeline `sampling.editing_guidance_scale` and latent reconstruction MSE. Only
 these embeddings are optimized; model weights and conditional embeddings stay
 fixed. Each step starts from the previous step's optimized embedding.
 
@@ -177,8 +180,9 @@ at 1. It then follows the descending
 schedule with an empty unconditional caption and the configured inversion CFG.
 At each step, it records the latent residual
 `previous_pivot - predicted_previous_latent` and advances from the corrected latent.
-It performs no optimization and reads its two CFG settings from
-[`method_h_params/Direct.yaml`](../method_h_params/Direct.yaml).
+It performs no optimization and reads inversion CFG from
+[`method_h_params/Direct.yaml`](../method_h_params/Direct.yaml), while editing CFG
+comes from the selected pipeline parameter file.
 
 ```powershell
 uv run diffuse --method direct-inversion --h-params ALL

@@ -113,8 +113,6 @@ class _NullTextSettings(MethodGuidanceSettings):
         guidance = MethodGuidanceSettings.from_mapping(values)
         if guidance.inversion_guidance_scale < 1:
             raise ConfigError("null-text inversion_guidance_scale must be >= 1")
-        if guidance.editing_guidance_scale < 1:
-            raise ConfigError("null-text editing_guidance_scale must be >= 1 for optimization")
         return cls(num_inner_steps=steps, **numbers, **asdict(guidance))
 
 

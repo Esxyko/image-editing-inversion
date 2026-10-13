@@ -1,3 +1,2 @@
 # Method parameters used for inversion and artifact replay.
 inversion_guidance_scale: 1.25
-editing_guidance_scale: 7.5

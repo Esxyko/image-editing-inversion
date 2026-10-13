@@ -1,4 +1,4 @@
-"""Shared CFG settings for method-owned YAML parameters."""
+"""Inversion CFG settings for method-owned YAML parameters."""
 
 from __future__ import annotations
 
@@ -13,11 +13,11 @@ from .validation import ConfigError, number
 @dataclass(frozen=True, slots=True)
 class MethodGuidanceSettings:
     inversion_guidance_scale: float = 7.5
-    editing_guidance_scale: float = 7.5
 
     def __post_init__(self) -> None:
-        for name in ("inversion_guidance_scale", "editing_guidance_scale"):
-            object.__setattr__(self, name, number(getattr(self, name), f"method_h_params.{name}"))
+        object.__setattr__(self, "inversion_guidance_scale", number(
+            self.inversion_guidance_scale, "method_h_params.inversion_guidance_scale",
+        ))
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, Any]) -> MethodGuidanceSettings:

@@ -34,8 +34,8 @@ directory. Run the `uv` examples from the project root; the environment's instal
 | Location | Settings |
 | --- | --- |
 | [config.yaml](config.yaml) | Model/revision/resolution, eta/seed, P2P mode, runtime, optional per-method P2P settings |
-| [pipeline_h_params/](pipeline_h_params/) | Steps, cross-attention fraction, self-attention fraction |
-| [method_h_params/](method_h_params/) | Per-method inversion CFG, target-editing CFG, and algorithm parameters |
+| [pipeline_h_params/](pipeline_h_params/) | Steps, shared editing CFG, cross-attention fraction, self-attention fraction |
+| [method_h_params/](method_h_params/) | Per-method inversion CFG and algorithm parameters |
 
 Hold shared configuration, method parameters, and the dataset fixed for a
 comparison. Vary pipeline parameter files to sweep sampling and editing settings.
@@ -44,6 +44,7 @@ Each pipeline YAML requires:
 ```yaml
 sampling:
   num_inference_steps: 30
+  editing_guidance_scale: 7.5
 prompt_to_prompt:
   cross_replace_fraction: 0.4
   self_replace_fraction: 0.6
@@ -55,11 +56,12 @@ pipeline `guidance_scale` field. Each method YAML includes:
 
 ```yaml
 inversion_guidance_scale: 7.5
-editing_guidance_scale: 7.5
 ```
 
 Both CFG values must be finite and nonnegative; Null-text requires both to be
-at least `1`. Null-text optimizes its empty-caption embeddings at editing CFG
+at least `1`. Editing CFG is shared through pipeline `sampling.editing_guidance_scale`;
+it is rejected in method YAML and method snapshots. Null-text optimizes its
+empty-caption embeddings at editing CFG
 and uses that same CFG for source reconstruction and target editing. Its
 DDIM pivots use inversion CFG. When editing CFG is `1`, Adam updates
 are skipped because their gradients are zero. Source reconstruction uses editing
@@ -67,11 +69,18 @@ CFG for every bundled method. All target
 branches use editing CFG. DDIM and Direct read `DDIM.yaml` and `Direct.yaml`; Null-text and
 ReNoise retain their existing method files. Method parameters are loaded for both
 inversion and replay. Cache reuse and replay require the complete current method
-parameters to match the saved snapshot, including editing CFG. Historical artifacts
-without that snapshot require regeneration. Older Null-text artifacts without
+parameters and pipeline editing CFG to match the saved provenance. Historical
+artifacts without the method snapshot or separate editing CFG require regeneration.
+Older Null-text artifacts without
 inversion-CFG pivot state also require regeneration.
 P2P `auto` selects replacement for equal whitespace-word counts and refinement
 otherwise. Method-specific P2P extras do not override shared mode or fractions.
+
+The seven existing pipeline presets use editing CFG `7.5`.
+[`high_editing_guidance.yaml`](pipeline_h_params/high_editing_guidance.yaml) uses `10.0` and
+[`low_editing_guidance.yaml`](pipeline_h_params/low_editing_guidance.yaml) uses `5.0`;
+both retain `default.yaml`'s 15 steps and attention fractions `0.4`/`0.4`.
+Select either with `--h-params`, or include both through `--h-params ALL`.
 
 Checked-in batch sizes are **8** source images for inversion and **32** RGB tensor
 pairs for editing, with **4** threads for dataset/artifact reads. These are
@@ -236,7 +245,7 @@ run stores about 8.2 GiB of pixels. See [tensor loading examples](docs/artifacts
 
 Changing attention fractions or editing policies reuses compatible inversions.
 Changing steps or inversion CFG selects another artifact group. Changing any
-method hyperparameter, including editing CFG, invalidates reuse; affected entries
+method hyperparameter or pipeline editing CFG invalidates reuse; affected entries
 are replaced only after successful publication.
 Interrupted inversion leaves the previous published group intact; editing failure
 leaves completed inversions reusable. New artifacts embed metadata and tensor checksums,

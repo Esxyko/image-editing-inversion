@@ -42,7 +42,8 @@ UIDs such as `image:1` are stored verbatim. The method comes from the method
 directory and steps/guidance from the group name. Guidance values are written
 without rounding, with whole values such as `7.0` written as `7`.
 `h-params.json` records `num_inference_steps` and `guidance_scale`; the latter
-is inversion CFG. Target-editing CFG is recorded in the complete method snapshot.
+is inversion CFG. Shared editing CFG is recorded separately as provenance's
+`editing_guidance_scale` and in the resolved configuration's `sampling` section.
 Parameter filenames and attention replacement fractions do not affect grouping.
 Method IDs must be lowercase portable directory names, using letters, digits,
 dots, underscores, or hyphens, without reserved Windows names or a trailing dot.
@@ -56,7 +57,9 @@ and `method_id`. Its required `pipeline_h_params` contains steps and guidance.
 Replacements retain their existing positions; new IDs append in traversal order.
 The catalog uses schema v2 with per-ID input matching and one checksum per group
 file. Matching includes dataset identity/UID, model and scheduler settings,
-inversion guidance, complete method hyperparameters, and numerical runtime settings.
+inversion guidance, pipeline editing guidance, complete method hyperparameters,
+and numerical runtime settings. Cache lookup and publication require the saved
+editing guidance to match the cache inputs.
 Missing or incompatible cached entries are recomputed. An existing group whose
 integrity cannot be verified blocks publication and remains untouched, preventing
 limited or source-filtered runs from discarding unselected records. Malformed
@@ -92,10 +95,12 @@ rejects checksum mismatches; inversion preserves the original file and stops.
 Restore a verified copy and its catalog, or regenerate separately after preserving
 the original. The workflow never creates a trusted checksum from unverified data.
 
-Current schema-v1/v2 group files with complete matching method snapshots and
-catalog-v2 entries with cache identity version 3 are reusable. Previous artifact
-formats (including schema v5), missing snapshots, and older cache identities require regeneration.
-Missing snapshots and older identities are cache misses within verifiable collections;
+Current schema-v1/v2 group files with complete matching method snapshots, matching
+separate editing CFG, and catalog-v2 entries with cache identity version 4 are reusable.
+Previous artifact formats (including schema v5), missing snapshots or separate editing CFG,
+and older cache identities require regeneration. Legacy provenance remains readable;
+editing CFG is not automatically migrated from older method snapshots.
+Missing provenance fields and older identities are cache misses within verifiable collections;
 unsupported or unverifiable existing group files are preserved and block replacement. Legacy
 per-sample directories, hash-named groups, and catalog-v1 entries are ignored
 without deletion. The old catalog is replaced only after successful new-format
@@ -107,7 +112,8 @@ entries. All bundled methods now use `source_embedding_version: 1`, which
 invalidates the withdrawn overwrite cache identities and records original source
 encodings. Native legacy artifacts without static encodings remain supported by
 explicit replay using the original text-encoding path when they have complete
-matching method snapshots and a verifiable integrity baseline. Batches mixing artifacts
+matching method snapshots, separate editing CFG, and a verifiable integrity baseline.
+Batches mixing artifacts
 with and without captured encodings require regeneration. Fresh embedding state
 does not depend on intermediate caches during replay.
 
@@ -116,7 +122,7 @@ does not depend on intermediate caches during replay.
 Changing only attention fractions or editing policies reuses inversion. The
 bundled deterministic methods also reuse inversion when the editing seed
 changes. Changing steps or inversion CFG creates a new group; changing any other
-method setting, including editing CFG, replaces the sample's artifact in its group. Method
+method setting or pipeline editing CFG replaces the sample's artifact in its group. Method
 hyperparameters are loaded for cache matching using the
 same validated settings as inversion. Each run generates its RGB pixel tensors again.
 The additional algorithm identity records effective Null-text stopping thresholds
@@ -492,6 +498,7 @@ artifact = InversionArtifact(
         dataset_content=repository.content_digest,
         numerics=editor.inversion_cache_settings(),
         guidance_scale=config.inversion_guidance_scale,
+        editing_guidance_scale=config.editing_guidance_scale,
         method_h_params=config.require_method_h_params(),
     ),
 )
@@ -542,17 +549,19 @@ schema-v2 `sweep.json` manifest and `<parameter-file>/<method>/` children contai
 `results.jsonl`, `batches.jsonl`, `resolved-config.json`, and RGB batch files under `tensors/`.
 
 For inversion and replay runs, `resolved-config.json` contains `method_h_params`:
-the complete current method settings, including all defaults and both CFG values.
-The bound `config.method_h_params` records the same normalized snapshot. DDIM and
-Direct record their two CFG values; Null-text and ReNoise also record all of their
-optimization or refinement settings. Per-image provenance contains an optional
-`method_h_params` snapshot. Legacy metadata without that field remains readable,
-but cannot pass cache reuse or replay compatibility checks. Readers accept the
-additional provenance field without changing collection tensor schemas.
+the complete current method settings, including all defaults and inversion CFG.
+The bound `config.method_h_params` records the same normalized snapshot. Shared
+editing CFG is recorded under `sampling.editing_guidance_scale`. Null-text and
+ReNoise also record all of their optimization or refinement settings. Per-image
+provenance contains an optional `method_h_params` snapshot and separate optional
+`editing_guidance_scale`. Legacy metadata without either field remains readable,
+but cannot pass cache reuse or replay compatibility checks. Readers accept these
+additive provenance fields without changing collection tensor schemas.
 
-Final inversion cache identity version `3` includes the complete snapshot alongside
-existing algorithm `method_parameters` and production inputs. Any parameter
-change, including editing CFG or a currently unused optimization setting, prevents
+Final inversion cache identity version `4` includes the complete method snapshot and
+separate `editing_guidance_scale` alongside algorithm `method_parameters` and
+production inputs. Any parameter change, including editing CFG or a currently
+unused optimization setting, prevents
 reuse. Direct, Null-text and ReNoise per-step guidance and provenance's historical
 `guidance_scale` field denote inversion CFG. Published directory names still use
 `steps-N_guidance-G` with inversion CFG; changing other parameters republishes

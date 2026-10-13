@@ -88,6 +88,7 @@ class ArtifactProvenance:
     guidance_scale: float | None = None
     model_commit: str | None = None
     method_h_params: Mapping[str, Any] | None = None
+    editing_guidance_scale: float | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "model_content", _json_object(self.model_content, "model_content"))
@@ -103,6 +104,9 @@ class ArtifactProvenance:
         if self.method_h_params is not None:
             settings = _json_object(self.method_h_params, "method_h_params")
             for name in ("inversion_guidance_scale", "editing_guidance_scale"):
+                # Legacy snapshots may still carry method-owned editing CFG.
+                if name == "editing_guidance_scale" and name not in settings:
+                    continue
                 value = settings.get(name)
                 if (isinstance(value, bool) or not isinstance(value, (int, float))
                         or not math.isfinite(value) or value < 0):
@@ -116,6 +120,17 @@ class ArtifactProvenance:
             if (self.method_h_params is not None
                     and self.guidance_scale != self.method_h_params["inversion_guidance_scale"]):
                 raise ValueError("Saved guidance_scale must match method inversion guidance")
+        if self.editing_guidance_scale is not None:
+            if (isinstance(self.editing_guidance_scale, bool)
+                    or not isinstance(self.editing_guidance_scale, (int, float))
+                    or not math.isfinite(self.editing_guidance_scale) or self.editing_guidance_scale < 0):
+                raise ValueError("Saved editing_guidance_scale must be finite and nonnegative")
+
+    def validate_editing_guidance_scale(self, expected: float) -> None:
+        if self.editing_guidance_scale is None:
+            raise ArtifactCompatibilityError("Artifact lacks pipeline editing guidance; regenerate it")
+        if not math.isclose(self.editing_guidance_scale, expected, rel_tol=0, abs_tol=1e-9):
+            raise ArtifactCompatibilityError("Artifact editing guidance scale does not match this run")
 
     def validate_method_h_params(self, expected: Mapping[str, Any]) -> None:
         if self.method_h_params is None:
@@ -274,7 +289,7 @@ class InversionArtifact:
                 "model_content", "dataset_content", "numerics", "method_parameters", "guidance_scale", "model_commit",
             }
             if (not isinstance(provenance, dict) or not required <= provenance.keys()
-                    or provenance.keys() - required - {"method_h_params"}):
+                    or provenance.keys() - required - {"method_h_params", "editing_guidance_scale"}):
                 raise ValueError("Invalid artifact provenance fields")
             value["provenance"] = asdict(ArtifactProvenance(**provenance))
         return value

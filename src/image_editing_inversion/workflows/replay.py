@@ -145,6 +145,7 @@ class ReplayPreparer:
         artifact.validate()
         if artifact.provenance is None:
             raise ArtifactCompatibilityError("Artifact lacks complete method hyperparameters; regenerate it")
+        artifact.provenance.validate_editing_guidance_scale(context.config.editing_guidance_scale)
         artifact.provenance.validate_method_h_params(context.config.require_method_h_params())
         if artifact.provenance is not None:
             for name, expected in (
