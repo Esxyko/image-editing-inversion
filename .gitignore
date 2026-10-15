@@ -15,8 +15,9 @@ wheels/
 .env.*
 !.env.example
 
-# Generated datasets, caches, artifacts, and outputs (tracked history is retained)
-/data/
+# Generated data except version-controlled metric reports
+/data/*
+!/data/metrics/
 
 # Local dataset-building archive
 archive

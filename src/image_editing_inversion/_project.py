@@ -51,6 +51,14 @@ class ProjectPaths:
     def output(self) -> Path:
         return self.data / "output"
 
+    @property
+    def metrics(self) -> Path:
+        return self.data / "metrics"
+
+    @property
+    def evaluation_cache(self) -> Path:
+        return self.data / "cache" / "evaluation"
+
     def model_path(self, model_id: str) -> Path:
         path = Path(model_id).expanduser()
         return path if path.is_absolute() else self.root / path

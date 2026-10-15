@@ -3,7 +3,7 @@
 Compare DDIM, Null-text, Direct Inversion, and ReNoise with one Stable Diffusion
 1.5 runtime and Prompt-to-Prompt editor. Each dataset record produces a source
 reconstruction and a target-caption edit as RGB pixel tensors. Inversions are saved and reused across
-compatible experiments; dataset masks are reserved for later metrics.
+compatible experiments; archived runs can be evaluated against dataset masks and captions.
 
 ## Setup
 
@@ -27,7 +27,43 @@ Allow several gigabytes for the download cache and saved dataset.
 The directories containing configuration and data have fixed positions beside
 `src/`. Package paths resolve from that source layout, independent of the working
 directory. Run the `uv` examples from the project root; the environment's installed
-`diffuse` and `experiment` commands use the same fixed paths when called elsewhere.
+`diffuse`, `experiment`, and `evaluate` commands use the same fixed paths when called elsewhere.
+
+## Evaluate archived runs
+
+Install the optional metric dependencies, then evaluate the RGB ZIP files published
+by `compress_run`:
+
+```powershell
+uv sync --extra evaluation
+uv run --extra evaluation evaluate
+uv run --extra evaluation evaluate data/output/20261013T141357Z-5d372477.zip --device cuda --batch-size 16
+```
+
+Omitting ZIP paths selects all `data/output/*.zip`. Explicit paths resolve from
+the current working directory. The command reads archived batches directly and
+shares one dataset and one set of metric models across its inputs. It does not
+run generation or extract complete archives.
+
+```python
+from image_editing_inversion.evaluation import evaluate_archives
+
+reports = evaluate_archives(["data/output/20261013T141357Z-5d372477.zip"])
+```
+
+Each ZIP produces one nested JSON under `data/metrics/<UTC-time>-<unique-id>/`.
+Results include CLIP ViT-L/14 at 224px, edited-region CLIP, masked PSNR/SSIM/LPIPS,
+and batch-amortized inversion/editing core seconds per image. Every method and
+parameter file has separate `all`, `pie-bench`, and `magic-brush` statistics,
+per-image observations, cache-hit counts, and the full archived configuration.
+Cache-hit inversion core times are zero for this invocation, not measurements of
+the original inversion. Replay-only inversion times are unknown. No XLSX or
+additional per-method result files are created. Existing reports are preserved.
+
+The first evaluation downloads pinned public CLIP and SqueezeNet weights to
+`data/cache/evaluation/`; later invocations reuse them. Metrics run in float32;
+`--device cpu` and `--device mps` are also supported. Lower `--batch-size` for
+smaller devices. See [evaluation definitions and JSON layout](docs/evaluation.md).
 
 ## Configuration
 

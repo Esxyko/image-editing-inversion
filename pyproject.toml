@@ -22,8 +22,16 @@ dependencies = [
     "transformers>=5.5,<6",
 ]
 
+[project.optional-dependencies]
+evaluation = [
+    "lpips>=0.1.4,<0.2",
+    "torchmetrics>=1.8.2,<1.9",
+    "torchvision>=0.25,<0.27",
+]
+
 [tool.uv.sources]
 torch = { index = "pytorch-cu130", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }
+torchvision = { index = "pytorch-cu130", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }
 
 [[tool.uv.index]]
 name = "pytorch-cu130"
@@ -33,6 +41,7 @@ explicit = true
 [project.scripts]
 diffuse = "image_editing_inversion:diffuse"
 experiment = "image_editing_inversion:experiment"
+evaluate = "image_editing_inversion:evaluate"
 experiment-diagnostic = "image_editing_inversion.diagnostic:experiment"
 
 [project.entry-points."image_editing_inversion.methods"]

@@ -1,6 +1,7 @@
-"""Command-line entry points for inversion workflows."""
+"""Command-line entry points for generation and archived-run evaluation."""
 
 import argparse
+import logging
 import sys
 from pathlib import Path
 from typing import Callable, Sequence
@@ -104,5 +105,30 @@ def experiment(argv: Sequence[str] | None = None) -> int:
             args.method or ["ALL"], pipeline_h_params_file=args.h_params,
             dataset=args.dataset, nsamples=args.nsamples,
         )
+
+    return _execute(action)
+
+
+def build_evaluate_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="evaluate", description="Evaluate saved RGB ZIP runs and write nested JSON reports."
+    )
+    parser.add_argument(
+        "archives", nargs="*", type=Path, metavar="ZIP",
+        help="ZIP paths relative to cwd or absolute; omitted selects every ZIP in data/output.",
+    )
+    parser.add_argument("--device", default="cuda", help="Metric device: cuda[:index], cpu, or mps (default: cuda).")
+    parser.add_argument("--batch-size", type=int, default=16, help="Positive CLIP batch size (default: 16).")
+    return parser
+
+
+def evaluate(argv: Sequence[str] | None = None) -> int:
+    args = build_evaluate_parser().parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    def action() -> Path:
+        from .evaluation import evaluate_archives
+
+        return evaluate_archives(args.archives or None, device=args.device, batch_size=args.batch_size)
 
     return _execute(action)

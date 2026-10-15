@@ -1,6 +1,6 @@
 # Project structure
 
-The package has six subpackages. Public APIs are exported by their `__init__.py`
+The package has seven subpackages. Public APIs are exported by their `__init__.py`
 files; execution collaborators and implementation helpers remain internal.
 Configuration and storage locations are fixed relative to `src/`.
 
@@ -14,6 +14,7 @@ Configuration and storage locations are fixed relative to `src/`.
 |   |-- dataset.md                  # Schema, provenance, loading, identity
 |   |-- methods.md                  # Algorithms, restrictions, hyperparameters
 |   |-- artifacts.md                # Storage, caches, replay, timing
+|   |-- evaluation.md               # Archived metrics, source groups, core times, JSON
 |   |-- direct-reconstruction-tests.md # Direct GPU diagnostic controls and comparisons
 |   `-- adapters.md                 # Extension contracts and API migration
 |-- tests/test_direct_reconstruction.py # Opt-in Direct GPU integration tests/probes
@@ -41,7 +42,7 @@ Configuration and storage locations are fixed relative to `src/`.
 |   `-- ReNoise.yaml
 |-- .env.example                    # HF_TOKEN template; .env is ignored
 `-- src/image_editing_inversion/
-    |-- __init__.py, cli.py          # diffuse/experiment exports and command parsing
+    |-- __init__.py, cli.py          # diffuse/experiment/evaluate exports and command parsing
     |-- diagnostic.py              # Temporary experiment-diagnostic CLI (Null-text only)
     |-- _project.py                 # Internal source-relative fixed paths
     |-- config/
@@ -73,6 +74,11 @@ Configuration and storage locations are fixed relative to `src/`.
     |   |-- denoising.py            # Internal DDIM executor and hook/processor lifecycle
     |   |-- alignment.py, prompt_to_prompt.py # Token mapping and attention policy
     |   `-- processor.py, editor.py, result.py # Diffusers integration and editing
+    |-- evaluation/
+    |   |-- __init__.py, runner.py   # evaluate_archives facade and shared invocation resources
+    |   |-- models.py, archive.py   # Settings, validated manifests and streamed RGB ZIP batches
+    |   |-- metrics.py              # Pinned CLIP and masked background metric models
+    |   `-- timing.py, output.py    # Core batch allocation, source statistics, atomic JSON
     `-- workflows/
         |-- runner.py               # Reusable public facade and selector expansion
         |-- session.py              # One invocation's resources, scheduling, lifecycle
@@ -93,7 +99,8 @@ Configuration and storage locations are fixed relative to `src/`.
 | `artifacts` | Tensor contracts, compatibility, collection serialization, catalogs, publication | Internal project paths |
 | `inversion` | Adapter contracts, factories, algorithms, shared component computation | Configuration and artifacts |
 | `generation` | Model runtime, attention control, reconstruction/editing | Configuration, artifacts, denoising contracts |
-| `workflows` | Invocation resources, preflight, scheduling, replay, outputs | All lower-level packages |
+| `workflows` | Invocation resources, preflight, scheduling, replay, outputs | Configuration, data, artifacts, inversion, generation |
+| `evaluation` | Archived RGB evaluation, source groups, core timing, JSON reports | Dataset repository and internal project paths |
 
 Root-level `scripts/1.py`, `2.py`, and `3.py` only orchestrate existing `diffuse`
 CLI invocations. Each processes its fixed parameter group sequentially with every
@@ -108,6 +115,12 @@ Concrete methods import Diffusers when inversion or scheduler preflight executes
 Generation exports `Editor` lazily; defining attention policies does not import
 Diffusers. Workflows import the editor when the model phase begins. CLI parsing
 imports workflows only when executing the parsed command.
+Evaluation is independent of workflows/generation and does not load the diffusion
+model. Its public facade and CLI parsing do not import optional metric models;
+execution loads the `evaluation` extra only when requested. It shares a dataset,
+pinned CLIP/LPIPS models and target-text features across selected ZIPs, and reads
+one saved tensor batch at a time without extracting archives. Core timings are
+allocated through saved batch IDs before source-specific aggregation.
 
 `ProjectPaths` derives the root from the package's fixed position under `src/`.
 It accepts no root argument and does not search the working directory. The root
@@ -191,16 +204,25 @@ its path. Callers must exclude concurrent writers.
 ## Fixed storage layout
 
 ```text
-data/                               # New generated files ignored; tracked history retained
+data/                               # Generated files ignored except metrics/ reports
 |-- state.json, dataset_info.json, data-*.arrow
 |-- cache/inversion/
 |   |-- sources/<digest>.safetensors
 |   `-- conditional_pivots/<digest>.safetensors
+|-- cache/evaluation/               # Reusable pinned CLIP and SqueezeNet downloads
 |-- artifacts/
 |   |-- catalog.json                # Schema v2
 |   `-- <method>/steps-N_guidance-G/
 |       |-- h-params.json
 |       `-- artifacts.safetensors   # Schema v1/v2, ordered IDs and production metadata
+|-- metrics/                        # Version-controlled evaluation reports
+|   |-- <UTC-time>-<unique-id>/
+|   |   `-- <ZIP-stem>.json         # One report: parameter -> method -> groups, scores, timing
+|   `-- <evaluation-date>/          # Historical one-off reports retained unchanged
+|       |-- clip_masked_metrics.xlsx # Parameter rows, metric columns, one sheet per method
+|       |-- summary.json            # Shared metric protocol, provenance and evaluation timing
+|       `-- <parameter-file>/
+|           `-- metrics.json        # All methods: statistics, per-image scores, evaluation timing
 `-- output/
     |-- <run-id>.zip                # Explicitly archived run; original directory removed
     `-- <run-id>/
@@ -211,6 +233,12 @@ data/                               # New generated files ignored; tracked histo
             |-- batches.jsonl       # Schema v2 batch records
             `-- tensors/batch-<edit_batch_id>.safetensors # RGB output schema v1
 ```
+
+New evaluation reports consolidate all parameter files and methods of each ZIP in
+one JSON. Each method has all/PIE-Bench/MagicBrush statistics, per-image scores,
+complete archived settings and two-stage core times from `batches.jsonl`.
+Evaluation elapsed time is separate. Historical reports retain their original
+layout and metric-evaluation-only timing. See [evaluation](docs/evaluation.md).
 
 Group publication assumes one writer and keeps tensor memory bounded by batches.
 New collections embed metadata and per-tensor checksums. Replay verifies loaded
