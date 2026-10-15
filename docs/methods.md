@@ -6,6 +6,22 @@ uses `runtime.batch_size`. Both stages share device, dtype, and VAE settings.
 All bundled inversions require eta zero and use deterministic VAE posterior mode.
 The dataset mask is reserved for metrics and does not constrain editing.
 
+## Method overview
+
+| Method ID | YAML file | Method-specific replay state |
+| --- | --- | --- |
+| `ddim` | `DDIM.yaml` | Terminal latent; no per-step hook |
+| `null-text` | `Null_text.yaml` | Optimized unconditional embeddings and guidance state |
+| `direct-inversion` | `Direct.yaml` | Per-step source residuals and guidance state |
+| `renoise` | `ReNoise.yaml` | Terminal latent and guidance state |
+
+All four also save original source embeddings. Jump to
+[DDIM](#baseline-ddim-inversion), [Null-text](#null-text-inversion),
+[Direct](#direct-inversion), or [ReNoise](#renoise-inversion) for the algorithm
+and its restrictions.
+
+## Shared guidance and compatibility
+
 Every method has its own YAML under `method_h_params/`: `DDIM.yaml`,
 `Direct.yaml`, `Null_text.yaml`, or `ReNoise.yaml`. Each includes
 `inversion_guidance_scale`, defaulting to `7.5` when omitted; the checked-in method
@@ -78,7 +94,7 @@ The implementation is also available as `DDIMInversion` from
 Diffusers is imported during inversion or scheduler preflight; discovering the method does not
 load a model.
 
-## Null-text Inversion
+## Null-text inversion
 
 The bundled `null-text` method implements
 [Null-text Inversion](https://null-text-inversion.github.io/). It deterministically
@@ -90,12 +106,15 @@ using the pipeline `sampling.editing_guidance_scale` and latent reconstruction M
 these embeddings are optimized; model weights and conditional embeddings stay
 fixed. Each step starts from the previous step's optimized embedding.
 
+### Parameters
+
 The adapter reads
 [`method_h_params/Null_text.yaml`](../method_h_params/Null_text.yaml). This file is
-resolved relative to the fixed project root beside `src/` and loaded on the adapter's first
-inversion or replay preflight; its validated settings are cached for that invocation's adapter instance. Missing
-or malformed files fail clearly. Omitted keys use the defaults below, and unknown
-keys are rejected. Optimization settings do not change the experiment YAML.
+resolved relative to the fixed project root beside `src/`. The adapter loads and
+validates it on the first inversion or replay preflight, then keeps those settings
+for the invocation. Missing or malformed files fail clearly, and unknown keys are
+rejected. Omitted keys use the defaults below. Keep these optimization settings
+in the method file, separate from shared pipeline settings.
 
 | Hyperparameter | Default | Meaning |
 | --- | --- | --- |
@@ -109,6 +128,8 @@ For step index `i` out of `T`, the learning rate is
 `early_stop_epsilon + i * epsilon_increment`. The optimized parameter and Adam
 moments use float32, while embeddings are cast to the configured model precision
 for UNet calls. Latent MSE is computed in float32.
+
+### Runtime requirements
 
 Null-text inversion requires `sampling.eta: 0.0`, both CFG values at least 1, and a
 DDIM scheduler with epsilon prediction, leading timestep spacing, and disabled
@@ -138,6 +159,8 @@ uv run diffuse `
 
 Select only `--method null-text` for a Null-text run. The adapter is also
 exported as `NullTextInversion` from `image_editing_inversion.inversion`.
+
+### Optimization and saved state
 
 At optimization/editing guidance 1, the conditional-only prediction is independent of the
 unconditional embedding. Adam optimization is skipped; the empty unconditional
@@ -169,7 +192,7 @@ version in cache identity prevents automatic reuse. Earlier artifacts without
 `pivot_guidance_scale` also require regeneration; pivot-guidance versioning prevents
 automatic reuse of the former fixed-CFG-1 pivots.
 
-## Direct Inversion
+## Direct inversion
 
 The bundled `direct-inversion` method implements Ju et al.'s
 [Direct Inversion, later published as PnP Inversion](https://github.com/cure-lab/PnPInversion).
@@ -214,7 +237,7 @@ with matching complete method parameters and compatible configuration; it perfor
 new inversion. Reconstruction can differ from the original image because of
 VAE encoding/decoding and numerical precision.
 
-## ReNoise Inversion
+## ReNoise inversion
 
 The bundled `renoise` method implements the core iterative noising and averaging
 from [ReNoise: Real Image Inversion Through Iterative Noising](https://github.com/garibida/ReNoise-Inversion).
@@ -226,6 +249,8 @@ caption, an empty unconditional caption, and `inversion_guidance_scale`.
 The inverse update uses the editor's actual DDIM alpha products, timestep stride,
 and final-step boundary. The selected predictions are averaged in float32 before
 one final inverse update; UNet inputs use the configured runtime precision.
+
+### Parameters
 
 The adapter reads
 [`method_h_params/ReNoise.yaml`](../method_h_params/ReNoise.yaml). The file is loaded
@@ -258,6 +283,8 @@ uv run diffuse --method renoise --h-params ALL
 The adapter is also exported as `ReNoiseInversion` from
 `image_editing_inversion.inversion`.
 
+### Runtime requirements and replay
+
 ReNoise requires `sampling.eta: 0.0`, finite nonnegative inversion CFG, and
 a DDIM scheduler with epsilon prediction, leading timestep spacing, and disabled
 sample clipping and dynamic thresholding. Inversion and replay run without
@@ -276,4 +303,6 @@ method parameters and compatible configuration. Replay reads the method YAML
 but performs no further inversion. Reconstruction is approximate and can differ from
 the source because of inversion error, VAE encoding/decoding, and precision.
 
-See [artifact replay](artifacts.md#replay) and [adapter extensions](adapters.md).
+See [configuration](configuration.md) for shared settings,
+[artifact replay](artifacts.md#replay) for saved-state validation, and
+[adapter extensions](adapters.md) for custom implementations.

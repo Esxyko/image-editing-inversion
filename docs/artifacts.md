@@ -1,5 +1,16 @@
 # Artifact storage, reuse, and replay
 
+Inversion artifacts preserve per-image latent state and provenance independently
+of generated RGB outputs. This guide defines their format, publication rules,
+cache identity, and replay contract. For result files and archives, see
+[run outputs](run-outputs.md).
+
+- [Collection format](#collection-format)
+- [Publication and interruption](#publication-and-interruption)
+- [Cache reuse](#cache-reuse)
+- [Intermediate components](#intermediate-components)
+- [Replay](#replay)
+
 ## Collection format
 
 Generated inversions are stored independently in one combined file per method
@@ -145,6 +156,8 @@ cached results. Scheduler dependency-version metadata is
 excluded, together with default-value provenance and class-name metadata;
 effective scheduler settings are still matched.
 
+### Dataset and model identity
+
 Both cache layers also match the actual data and model contents.
 `DatasetRepository.content_digest` streams the actual Arrow dependencies once
 per invocation and includes effective dataset features and format. Saved state
@@ -169,6 +182,8 @@ Built-in inversion requires eta zero and uses the VAE posterior mode, so its
 seed does not affect inversion or the generated edit. Random external adapters
 still declare their seeds through `inversion_cache_parameters`. Target prompts
 and P2P policies are applied afresh during editing.
+### Cache-hit timing
+
 Cache hits are resolved individually, and only misses enter model calls.
 Consequently, an actual inversion batch can be smaller than the configured size.
 For fresh artifacts, `inversion_batch_seconds` measures the batch including
@@ -238,214 +253,24 @@ invalidate caches; remove affected cache entries when recomputation is needed.
 
 ## RGB tensor outputs
 
-New inversion and replay runs save decoded RGB pixels instead of PNG images.
-VAE decoding, image-processor denormalization and clamping still run; normalized
-values are converted to float32, multiplied by 255, rounded and converted to
-uint8 as in the previous PNG pixel path. `Editor.edit_batch` returns `EditResult`
-objects with contiguous CPU tensors `[3, height, width]` for `reconstructed` and
-`edited`, rather than PIL images. Outputs are pixels, not VAE latents or CLIP embeddings.
-
-Each successful editing batch writes
-`tensors/batch-<edit_batch_id>.safetensors` under its method output directory:
-
-| Field | Contract |
-| --- | --- |
-| Tensor keys | `reconstructed`, `edited` |
-| Tensor dtype and shape | uint8 `[N, 3, height, width]`, CPU RGB pixels |
-| Metadata | String-valued `schema_version: "1"`, JSON `uids`, `color_space: "RGB"`, `layout: "NCHW"`, `value_range: "0..255"`, `method_id`, `pipeline_h_params_file`, `edit_batch_id` |
-| Successful sample record | Raw `uid`, relative `tensor_file`, zero-based `tensor_index`, and existing artifact/batch references |
-
-`uids[i]` identifies position `i` in both tensors. Only compatible, actually
-edited samples enter that list, including when a replay batch skips other
-references. The temporary batch file is atomically published before successful
-sample records are appended. Write failures remove the temporary file and retain
-previously published batches; a failure during later result recording may leave
-a complete tensor batch whose metadata still identifies every member. Existing
-batch files are never overwritten. New result records have no
-`reconstructed_image` or `edited_image` fields. Historical PNG files and records
-remain unchanged; consumers of new outputs must use the tensor references.
-
-Generation performs no PNG compression or whole-run aggregation. Memory stays
-bounded by the editing batch, and a tail batch stores its actual sample count. Two 512x512
-RGB results use 1.5 MiB per sample, about 8.2 GiB for 1,400 samples across four methods.
-
-Read one sample without materializing the entire output batch:
-
-```python
-import json
-from pathlib import Path
-from safetensors import safe_open
-
-method_dir = Path("data/output/<run-id>/default.yaml/ddim")
-uid = "435242:2"  # Use a UID present in this method's results.
-with (method_dir / "results.jsonl").open(encoding="utf-8") as records:
-    row = next(record for line in records
-               if (record := json.loads(line))["uid"] == uid and record["status"] == "ok")
-index = row["tensor_index"]
-with safe_open(str(method_dir / row["tensor_file"]), framework="pt", device="cpu") as saved:
-    uids = json.loads(saved.metadata()["uids"])
-    if uids[index] != uid:
-        raise ValueError("Tensor UID does not match the result record")
-    reconstructed_chw = saved.get_slice("reconstructed")[index:index + 1].squeeze(0).clone()
-    edited_chw = saved.get_slice("edited")[index:index + 1].squeeze(0).clone()
-edited_hwc = edited_chw.permute(1, 2, 0).contiguous()  # RGB uint8 [H, W, 3]
-edited_float = edited_chw.float() / 255.0            # RGB float32 [3, H, W] in [0, 1]
-```
+Decoded reconstructions and edits are saved as uint8 RGB batches under each run.
+See [RGB tensor outputs](run-outputs.md#rgb-tensor-outputs) for the schema and loading example.
 
 ## Run archives
 
-`workflows.compress_run(run_id: str) -> Path` archives one inactive run under the
-fixed `data/output/` root. It accepts only a directory name and requires a valid
-`sweep.json` with top-level status `ok` or `error`; missing, invalid, pending, and
-running manifests are rejected. The source must be a direct child of output,
-with only regular files and directories. Symbolic links, directory junctions,
-and special files are rejected before writing.
-
-The sibling `data/output/<run-id>.zip` contains the `<run-id>/` root and all
-contents, including hidden files and empty directories. DEFLATE level 6 and
-ZIP64 support are enabled; file data is streamed rather than loaded as tensors.
-The archive contains outputs only, not the separate dataset, inversion artifacts,
-or intermediate caches. Extract it before using the ordinary tensor-loading
-examples and result records' relative paths.
-
-Compression writes a unique hidden temporary file beside the run. Once closed,
-the archive is checked for the exact member list, uncompressed sizes, directory
-types, and every member's CRC. Source snapshots include names, file sizes,
-modification/change times, and filesystem identities; changes abort publication.
-The verified temporary file atomically replaces any existing sibling ZIP. An
-existing destination must be a regular file, not a link, junction, or directory.
-Before publication, failures preserve the source and any old ZIP and attempt to
-remove the temporary file; cleanup errors are attached to the original exception.
-
-After publication, source containment and the snapshot are checked again before
-recursive deletion. The API returns the absolute ZIP path only after deletion
-succeeds. If that final check or deletion fails, the new verified ZIP remains;
-the exception identifies its path and warns that source deletion may be partial.
-User interruption during cleanup carries the same information as an exception
-note. A process termination may leave a temporary file or a partly removed
-source, depending on the stage reached.
-
-Callers must ensure there are no concurrent writers to the run or its ZIP. A
-terminal manifest and snapshot checks are not a cross-process lock. Archiving is
-explicit and does not run automatically after generation or replay.
+`compress_run` verifies and publishes a ZIP before deleting the source run.
+See [run archives](run-outputs.md#run-archives) for the storage and failure contract.
 
 ## Temporary Null-text diagnostics
 
-`experiment-diagnostic` runs the ordinary Null-text inversion/reconstruction/edit
-workflow with fresh source encodings, pivots, and inversions. It writes three
-additional files beside `results.jsonl`; each result references their filenames.
-The command uses the ordinary Null-text artifact group and replaces its selected
-UID prefix on publication, but final inversion cache reuse is disabled for this run.
-
-`optimization.jsonl` streams one completed optimization timestep per sample,
-including UID, source/target prompts, zero-based `step_index`, actual `timestep`,
-`target_pivot_index`, and `target_timestep` (`null` for the original source latent).
-Metrics are defined as follows:
-
-| Field | Meaning |
-| --- | --- |
-| `inner_losses` | MSE before each Adam update, in update order |
-| `loss_before` | First entry of `inner_losses`, or null when guidance 1 skips optimization |
-| `loss_after` | MSE measured after the last Adam update, or after the conditional-only step at guidance 1; matches that sample's `reconstruction_mse[step_index]` |
-| `best_loss` | Minimum of the observed pre-update losses and final post-update loss |
-| `gradient_norms` | L2 norm of the unconditional embedding's float32 gradient for each update |
-| `embedding_update_norms` | L2 norm of the float32 embedding parameter change per update |
-| `effective_embedding_change_fraction` | Fraction of embedding elements that differ before/after an update after both are cast to the model dtype |
-| `learning_rate`, `early_stop_threshold` | Actual step-specific optimizer learning rate and stopping threshold |
-| `actual_num_inner_steps` | Number of Adam updates; also the length of all per-update arrays |
-| `stop_reason` | `guidance_one` when guidance 1 skips optimization; otherwise `threshold_reached` if the last pre-update loss is below the threshold, or `max_inner_steps` |
-| `early_stop_loss_before_update` | Last pre-update loss, used by the ordinary early-stop check, or null when optimization is skipped |
-| `loss_after_below_threshold` | Whether the final post-update loss also satisfies the threshold |
-
-All losses compare scaled VAE latents in float32, not decoded RGB pixels. The
-ordinary algorithm checks the pre-update loss after applying Adam; recording
-preserves this behavior. Nonfinite diagnostic norms are serialized as strings
-`nan`, `inf`, or `-inf`; the ordinary finite-value checks still apply to model
-losses, gradients, embeddings, and latents. Completed steps remain available if
-a later step or editing phase fails.
-
-`reconstruction.jsonl` measures the final source branch before VAE decoding:
-
-| Field | Meaning |
-| --- | --- |
-| `optimization_source_latent_mse` | Final optimized latent vs. original encoded source latent; matches `final_reconstruction_mse` |
-| `replay_source_latent_mse` | Actual reconstruction latent from the editing pass vs. the same encoded source latent |
-| `replay_optimized_latent_mse` | Actual reconstruction latent vs. the final optimized latent; isolates disagreement between optimization and replay |
-
-`diagnostic-config.json` records both scheduler configurations and timestep
-lists, model/dataset identities, model and embedding parameter dtypes,
-hyperparameters, dependency/Python versions, and hashes of the relevant source
-files. Diagnostics use detached observations and do not add UNet forward calls.
-The temporary observer retains the encoded source and final optimized latent
-for each selected sample until that sample's editing batch is prepared. Output
-recording and diagnostic reductions add overhead to the reported timings.
+`experiment-diagnostic` records optimization steps, reconstruction comparisons,
+and reproducibility metadata. See [Null-text diagnostics](null-text-diagnostics.md)
+for commands and field definitions.
 
 ## Results and timing
 
-`edit_batch_seconds` retains the preparation-plus-editor wall time, excluding input
-reads and tensor writes. Both legacy batch durations repeat on member records;
-use `batches.jsonl` for aggregate timing instead of summing those repeated fields.
-`results.jsonl` additionally records `inversion_batch_id` and `edit_batch_id`.
-Null-text results include `actual_num_inner_steps`, the list of actual Adam update
-counts in the artifact's descending timestep order, and `total_inner_steps`, their
-sum. These counts describe the original inversion and are retained for cache hits
-and replay. Counts are zero when optimization/editing CFG is 1. Artifacts must
-carry `optimization_guidance_scale`, equal to the current editing CFG; source
-reconstruction uses that saved scale too. Earlier artifacts optimized at
-inversion CFG require regeneration. Null-text artifacts also carry
-`pivot_guidance_scale`, equal to inversion CFG. Earlier fixed-CFG-1 pivot artifacts
-without that state require regeneration; pivot-guidance versioning invalidates
-their automatic cache reuse. Compatible artifacts without counts report
-`null` for both fields; newly computed inversions persist counts in per-step state.
-Null-text results also include `reconstruction_mse`, the per-timestep latent MSE
-after all Adam updates, and `final_reconstruction_mse`, its last entry. Each error
-compares the optimized trajectory latent against the corresponding target pivot
-in float32; the final error compares against the source image's encoded latent.
-These values describe the original inversion, not decoded-image pixel error or
-a new replay measurement. They are persisted with the artifact and retained for
-cache hits and replay. Artifacts with complete matching snapshots but without errors remain reusable and report
-`null` for both error fields; recompute inversion to populate them.
-Cache hits retain their lookup batch ID, replay-only inversions use `null`, and
-skipped samples have no edit batch ID (`null`).
-
-Each attempted inversion batch, editing method segment, and group publication
-writes exactly one schema-v2 record to `batches.jsonl`, including failed attempts.
-Common fields are `batch_id`, `phase`, `sample_count`, `status`, and
-`durations_seconds`, with the method ID and parameter filename identifying its
-output. Errors include an `error` message. Stages not reached have zero duration.
-
-| Phase | Duration keys | Counts |
-| --- | --- | --- |
-| `inversion` | `input_read`, `cache_lookup`, `method`, `validation`, `staging` | `sample_count` is the requested chunk size; `cache_hits` and `uncached_count` describe resolved lookups |
-| `edit` | `input_read`, `preparation`, `editor`, `tensor_write` | `sample_count` is the requested method segment; `edited_count` is the number prepared for editing |
-| `publication` | `publication` | `sample_count` is the number traversed in the inversion pass |
-
-Cache lookup time includes cache identity construction, loading, and validation
-of cached entries; the first batch also includes opening and checking the existing
-published group's integrity. Inversion `input_read` measures only missing-sample
-reads and stays zero for batches containing only cache hits.
-The `method` duration measures the adapter call, including its
-internal image encoding, validation, and device transfers; it is not pure UNet
-time. `validation` covers the workflow's additional checks on fresh artifacts.
-Publication covers assembly, checksum computation, and catalog updates and is
-never repeated on sample records. Readers preserve existing edit chunk and method
-boundaries; a segment containing only incompatible artifacts is recorded as
-`skipped` with `edited_count: 0`. CUDA/MPS model stages synchronize at their timing
-boundaries; CPU stages use wall-clock timing. Timing adds no per-timestep
-synchronization, although numerical validation and early-stop decisions may synchronize.
-Model loading and preflight are outside these batch durations.
-
-Historical schema-v1 batch records retain `image_write`; new schema-v2 records
-use `tensor_write`. The remaining duration keys and legacy per-sample duration
-definitions are unchanged. RGB quantization and the transfer to CPU are part of
-`editor`; batch assembly and atomic file publication are part of `tensor_write`.
-
-Inversion batch diagnostics also include `source_cache_hits`, `source_cache_misses`,
-`pivot_cache_hits`, and `pivot_cache_misses`, counted per image, plus
-`intermediate_cache_write_errors` containing component, UID, and error details.
-Intermediate lookup, computation, and storage are included in the `method`
-duration. Final-artifact hits bypass intermediate work and leave these counts at
-zero. Reusing intermediates alone does not set `artifact_reused` to `true`.
+Sample results reference unique inversion and editing batch IDs. Use the batch
+records for aggregate durations; see [results and timing](run-outputs.md#results-and-timing).
 
 ## Replay
 
@@ -467,6 +292,8 @@ does not fill in provenance from current settings. Compatibility mismatches
 remain `ArtifactCompatibilityError`. The runner also validates tensor shapes
 and method-specific replay requirements. Group merges retain every entry's
 original production record, even when entries came from different runs.
+
+### Reading collections
 
 `ArtifactCollection(path)` exposes ordered `ids`, `references`, and
 `reference(sample_uid)`. Each `ArtifactReference` contains `path`, `index`, and
@@ -497,6 +324,8 @@ tensors. Invalid cached latents cause recomputation; explicit replay rejects
 non-finite latents as malformed artifacts. Editing restores installed attention
 processors and performs model-offload cleanup on success or failure, including
 encoding and decoding failures. Cleanup failures do not replace an existing error.
+
+### Publishing external artifacts
 
 For the project Hub dataset, an external inversion implementation can package
 its computed `z_t` tensor as follows:
@@ -561,6 +390,8 @@ run_dir = edit_artifacts("PASTE_SAMPLE_ID_HERE")
 print(run_dir)
 ```
 
+### Replay selection and outputs
+
 The optional `artifact_id` argument accepts a raw dataset sample UID. Every matching
 position across method/settings groups is replayed. Call `edit_artifacts()` without
 an ID to replay every supported published collection, including uncached entries,
@@ -584,6 +415,8 @@ selected artifacts into the existing group and preserves other sources' entries.
 parameter file. Results are written under `data/output/<run-id>/` with a
 schema-v2 `sweep.json` manifest and `<parameter-file>/<method>/` children containing
 `results.jsonl`, `batches.jsonl`, `resolved-config.json`, and RGB batch files under `tensors/`.
+
+### Configuration snapshots and manifests
 
 For inversion and replay runs, `resolved-config.json` contains `method_h_params`:
 the complete current method settings, including all defaults and inversion CFG.
@@ -618,6 +451,5 @@ Only the selected prefix is inverted and edited; cached records count toward the
 limit and publication preserves artifacts outside it. Unlimited and replay runs
 omit `nsamples`. Sample selection does not change cache identity or artifact schemas.
 
-Run
-records contain UIDs, combined artifact paths, and artifact indices rather than
+Run records contain UIDs, combined artifact paths, and artifact indices rather than
 prompts, source images, or masks.

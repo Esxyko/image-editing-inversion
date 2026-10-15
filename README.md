@@ -1,361 +1,131 @@
 # Image Editing Inversion
 
-Compare DDIM, Null-text, Direct Inversion, and ReNoise with one Stable Diffusion
-1.5 runtime and Prompt-to-Prompt editor. Each dataset record produces a source
-reconstruction and a target-caption edit as RGB pixel tensors. Inversions are saved and reused across
-compatible experiments; archived runs can be evaluated against dataset masks and captions.
+Compare **DDIM, Null-text, Direct Inversion, and ReNoise** using one Stable
+Diffusion 1.5 runtime and a shared Prompt-to-Prompt editor. Each dataset record
+produces a source reconstruction and a target-caption edit, saved as RGB pixel
+tensors. Compatible inversions are cached and can be replayed; archived runs can
+be evaluated against dataset captions and edit masks.
 
 ## Setup
 
-Use Python **3.14+** and `uv`. The checked-in configuration targets CUDA with
-float16; select a supported device and precision before running.
+Use **Python 3.14+** and **uv**. Install dependencies from the project root:
 
 ```powershell
 uv sync
 ```
 
-The project dataset, `beatle-ju1ce/image-editing-inversion`, is private. Request
-access, then set `HF_TOKEN` in your environment, fill the root `.env` using
+The dataset, `beatle-ju1ce/image-editing-inversion`, is private. Obtain access,
+then set `HF_TOKEN` in your environment, create a root `.env` from
 [.env.example](.env.example), or use an existing Hugging Face login. The first
-load downloads the eval split into `data/`; later loads use that saved copy.
-Both `diffuse` and `experiment` use `eval` by default. Their `--dataset`
-argument filters source datasets within `eval`.
-The dev split contains the MagicBrush records excluded by the edit-turn rules
-in [the dataset reference](docs/dataset.md#eval-and-dev-splits).
+load saves the Hub `eval` split under `data/`; later runs reuse the local copy.
 Allow several gigabytes for the download cache and saved dataset.
 
-The directories containing configuration and data have fixed positions beside
-`src/`. Package paths resolve from that source layout, independent of the working
-directory. Run the `uv` examples from the project root; the environment's installed
-`diffuse`, `experiment`, and `evaluate` commands use the same fixed paths when called elsewhere.
+The checked-in runtime uses CUDA and float16. Review [config.yaml](config.yaml)
+and the [configuration guide](docs/configuration.md) for device, precision, and
+batch sizes before running. Configuration and storage paths are fixed relative
+to the source layout; run these `uv` examples from the project root.
 
-## Evaluate archived runs
+## Run a comparison
 
-Install the optional metric dependencies, then evaluate the RGB ZIP files published
-by `compress_run`:
-
-```powershell
-uv sync --extra evaluation
-uv run --extra evaluation evaluate
-uv run --extra evaluation evaluate data/output/20261013T141357Z-5d372477.zip --device cuda --batch-size 16
-```
-
-Omitting ZIP paths selects all `data/output/*.zip`. Explicit paths resolve from
-the current working directory. The command reads archived batches directly and
-shares one dataset and one set of metric models across its inputs. It does not
-run generation or extract complete archives.
-
-```python
-from image_editing_inversion.evaluation import evaluate_archives
-
-reports = evaluate_archives(["data/output/20261013T141357Z-5d372477.zip"])
-```
-
-Each ZIP produces one nested JSON under `data/metrics/<UTC-time>-<unique-id>/`.
-Results include CLIP ViT-L/14 at 224px, edited-region CLIP, masked PSNR/SSIM/LPIPS,
-and batch-amortized inversion/editing core seconds per image. Every method and
-parameter file has separate `all`, `pie-bench`, and `magic-brush` statistics,
-per-image observations, cache-hit counts, and the full archived configuration.
-Cache-hit inversion core times are zero for this invocation, not measurements of
-the original inversion. Replay-only inversion times are unknown. No XLSX or
-additional per-method result files are created. Existing reports are preserved.
-
-The first evaluation downloads pinned public CLIP and SqueezeNet weights to
-`data/cache/evaluation/`; later invocations reuse them. Metrics run in float32;
-`--device cpu` and `--device mps` are also supported. Lower `--batch-size` for
-smaller devices. See [evaluation definitions and JSON layout](docs/evaluation.md).
-
-## Configuration
-
-| Location | Settings |
-| --- | --- |
-| [config.yaml](config.yaml) | Model/revision/resolution, eta/seed, P2P mode, runtime, optional per-method P2P settings |
-| [pipeline_h_params/](pipeline_h_params/) | Steps, shared editing CFG, cross-attention fraction, self-attention fraction |
-| [method_h_params/](method_h_params/) | Per-method inversion CFG and algorithm parameters |
-
-Hold shared configuration, method parameters, and the dataset fixed for a
-comparison. Vary pipeline parameter files to sweep sampling and editing settings.
-Each pipeline YAML requires:
-
-```yaml
-sampling:
-  num_inference_steps: 30
-  editing_guidance_scale: 7.5
-prompt_to_prompt:
-  cross_replace_fraction: 0.4
-  self_replace_fraction: 0.6
-```
-
-Steps must be positive and fractions within `[0, 1]`.
-Unknown settings and misplaced pipeline settings are rejected, including the old
-pipeline `guidance_scale` field. Each method YAML includes:
-
-```yaml
-inversion_guidance_scale: 7.5
-```
-
-Both CFG values must be finite and nonnegative; Null-text requires both to be
-at least `1`. Editing CFG is shared through pipeline `sampling.editing_guidance_scale`;
-it is rejected in method YAML and method snapshots. Null-text optimizes its
-empty-caption embeddings at editing CFG
-and uses that same CFG for source reconstruction and target editing. Its
-DDIM pivots use inversion CFG. When editing CFG is `1`, Adam updates
-are skipped because their gradients are zero. Source reconstruction uses editing
-CFG for every bundled method. All target
-branches use editing CFG. DDIM and Direct read `DDIM.yaml` and `Direct.yaml`; Null-text and
-ReNoise retain their existing method files. Method parameters are loaded for both
-inversion and replay. Cache reuse and replay require the complete current method
-parameters and pipeline editing CFG to match the saved provenance. Historical
-artifacts without the method snapshot or separate editing CFG require regeneration.
-Older Null-text artifacts without
-inversion-CFG pivot state also require regeneration.
-P2P `auto` selects replacement for equal whitespace-word counts and refinement
-otherwise. Method-specific P2P extras do not override shared mode or fractions.
-
-The seven existing pipeline presets use editing CFG `7.5`.
-[`high_editing_guidance.yaml`](pipeline_h_params/high_editing_guidance.yaml) uses `10.0` and
-[`low_editing_guidance.yaml`](pipeline_h_params/low_editing_guidance.yaml) uses `5.0`;
-both retain `default.yaml`'s 15 steps and attention fractions `0.4`/`0.4`.
-Select either with `--h-params`, or include both through `--h-params ALL`.
-
-Checked-in batch sizes are **8** source images for inversion and **32** RGB tensor
-pairs for editing, with **4** threads for dataset/artifact reads. These are
-starting settings for a 32 GB VRAM GPU at 512x512; tune batch sizes using peak
-memory and images per second, including Null-text backward passes.
-The stages are independent; an editing batch of `N` pairs contains `N` source
-and `N` target branches, doubled to `4N` UNet branches for classifier-free
-guidance. Omitted `inversion_batch_size`
-defaults to `1`. Reduce batches for smaller GPUs; CPU offload and attention
-chunking are configurable. Null-text inversion supports `none`/`model` offload;
-its replay also supports sequential offload. An out-of-memory error stops the run.
-
-Shared YAML is read once per invocation. Method parameters stay fixed for that
-invocation and are reloaded on the next one. Hardware/configuration constraints
-fail before model loading; complete method preflight precedes sample inversion.
-See [method requirements and defaults](docs/methods.md).
-
-## Run experiments
-
-Compare every discovered method on the first 10 records with one parameter file:
+Start with all discovered methods on the first 10 eval records:
 
 ```powershell
 uv run experiment --h-params default.yaml --nsamples 10
-uv run experiment --h-params default.yaml --nsamples 10 --dataset magic-brush
-uv run experiment --method ddim --method null-text --h-params default.yaml --nsamples 10
 ```
 
-`experiment` defaults to all discovered methods. Use the repeatable `--method`
-argument to select methods, or `--method ALL` to explicitly select all methods.
-Selectors use the same ordering and deduplication rules as `diffuse` below.
-Both `--h-params` and `--nsamples` are required; `--h-params ALL` is
-rejected and the sample count must be a positive integer. Source filtering, when
-specified, occurs before taking the first records in dataset order. Every method
-inverts, reconstructs, and edits the same prefix. A count larger than the available
-records processes every available record; an empty selection fails. MagicBrush
-turns count as individual records. Cached records count toward the limit and reuse
-compatible inversions; existing artifacts outside the prefix remain published.
-Limited runs record the requested count in the top-level `nsamples` field of
-`sweep.json`.
-
-For a temporary Null-text diagnostic run with the same sample selection, model,
-hyperparameters, inversion/edit batch sizes, and RGB outputs:
+Select specific methods and a source dataset when needed:
 
 ```powershell
-uv run experiment-diagnostic --method null-text --h-params high_steps.yaml --nsamples 64
+uv run experiment --method ddim --method null-text --h-params default.yaml --nsamples 10 --dataset magic-brush
 ```
 
-This command supports only `null-text`; omitting `--method` selects it. The other
-experiment arguments, including `--dataset`, have the same meanings. It always
-recomputes inversion, source encodings, and conditional pivots. It publishes the
-selected prefix into the ordinary Null-text artifact group, as a fresh experiment
-does, but does not register these diagnostic inversions as cache hits for later runs.
-
-Under `data/output/<run-id>/high_steps.yaml/null-text/`, the ordinary outputs are
-accompanied by `optimization.jsonl` (one sample/timestep per line),
-`reconstruction.jsonl` (final reconstruction diagnostics per sample), and
-`diagnostic-config.json` (actual schedules, scheduler configurations, versions,
-and source hashes). Losses, gradient/update norms, and the fraction of embedding
-elements changed after conversion to the model dtype are collected from the
-existing evaluations; no extra UNet calls are made. Recording adds runtime overhead,
-so use ordinary experiments to compare execution times. See
-[diagnostic field definitions](docs/artifacts.md#temporary-null-text-diagnostics).
-
-Invert, reconstruct, and edit every project record with one parameter file:
+For a full-dataset run or a sweep across all pipeline parameter files:
 
 ```powershell
 uv run diffuse --method ddim --h-params default.yaml
+uv run diffuse --method ALL --h-params ALL
 ```
 
-Compare selected methods across every top-level pipeline YAML:
+Both commands use the combined `eval` split: 1,400 records from PIE-Bench and
+MagicBrush. `--dataset pie-bench` or `--dataset magic-brush` filters that split
+before any sample limit. `experiment` requires one parameter filename and a
+positive sample count; `diffuse` also supports `--h-params ALL`.
 
-```powershell
-uv run diffuse --method ddim --method null-text --method direct-inversion --method renoise --h-params ALL
-```
-
-Use `--method ALL` for all discovered adapters. Repeatable selectors expand in
-command-line order, duplicates run once, and `ALL` expands IDs in sorted order.
-Only uppercase `ALL` is reserved. `--h-params ALL` processes filenames in sorted
-order, completing every selected method for one file before the next.
-
-The three Python scripts in `scripts/` split the nine pipeline configurations
-into fixed groups. Each runs every discovered method on the entire combined eval
-dataset, completing one configuration before starting the next:
-
-| Script | Configuration order |
-| --- | --- |
-| `scripts/1.py` | `default.yaml`, `high_steps.yaml`, `low_steps.yaml` |
-| `scripts/2.py` | `high_editing_guidance.yaml`, `low_editing_guidance.yaml`, `high_cross_replace.yaml` |
-| `scripts/3.py` | `low_cross_replace.yaml`, `high_self_replace.yaml`, `low_self_replace.yaml` |
-
-Run each script separately from the project root, waiting for it to finish before
-starting the next:
-
-```powershell
-uv run python scripts/1.py
-uv run python scripts/2.py
-uv run python scripts/3.py
-```
-
-Scripts locate the project root relative to their own files and invoke
-`uv run diffuse --method ALL --h-params <filename>` there. Diffusion output remains
-visible in the terminal. Each completed configuration is logged immediately to
-the terminal and `data/output/script-logs/<script-number>.log`, with a timestamp,
-filename, progress, and elapsed seconds. Logs use UTF-8 and append on subsequent
-runs. A failed subprocess, launch error, or user interruption is logged and stops
-the current script with a nonzero exit code (130 for user interruption). Rerunning
-a script starts its configuration list again; there is no automatic retry or
-resume.
-
-Use `--dataset pie-bench` or `--dataset magic-brush` to invert, reconstruct,
-and edit only records from that source across every selected method and parameter
-file. Omit it to process the entire combined dataset:
-
-```powershell
-uv run diffuse --method ddim --h-params default.yaml --dataset pie-bench
-uv run diffuse --method ddim --h-params default.yaml --dataset magic-brush
-```
-
-The top-level `dataset` field in `sweep.json` records this selection, or `null`
-when omitted. Source filtering retains the combined dataset's cache identity.
-
-Python callers can use the same workflow:
-
-```python
-from image_editing_inversion.workflows import run_methods
-
-run_dir = run_methods(["ddim", "null-text"], pipeline_h_params_file="default.yaml")
-print(run_dir)
-```
-
-Both `run_methods` and `WorkflowRunner.run_methods` accept the optional keyword
-`dataset="pie-bench"` or `dataset="magic-brush"`; `None` selects every record.
-Unsupported values raise `ValueError` before an execution session is created.
-
-```python
-run_dir = run_methods(["ddim"], pipeline_h_params_file="default.yaml", dataset="magic-brush")
-```
-
-Both APIs also accept `nsamples=10` to limit processing to the first 10 records
-after source filtering, or `None` (the default) to process every selected record.
-Booleans, non-integer values, and nonpositive counts raise `ValueError` before an
-execution session is created. The Python equivalent of `experiment` is:
-
-```python
-run_dir = run_methods(["ALL"], pipeline_h_params_file="default.yaml", nsamples=10)
-```
-
-## Replay saved inversions
-
-```python
-from image_editing_inversion.workflows import edit_artifacts
-
-run_dir = edit_artifacts()            # All published artifacts, all parameter files
-# run_dir = edit_artifacts("435242:2") # Every matching artifact for one raw dataset UID
-```
-
-Replay uses registered adapters and saved state, loading current method
-hyperparameters for full snapshot matching without recomputing inversion. Incompatible artifact/file pairs are
-recorded as `skipped`; malformed artifacts and operational failures stop execution.
-If every pair is skipped, replay raises an error.
+See [workflows](docs/workflows.md) for selection rules, sequential sweep scripts,
+Python APIs, replay, and archiving. See the [dataset reference](docs/dataset.md)
+for schema, provenance, and the separate `dev` split.
 
 ## Outputs and reuse
 
-```text
-data/
-|-- state.json, dataset_info.json, data-*.arrow
-|-- cache/inversion/                 # Per-image source encodings and conditional pivots
-|-- artifacts/
-|   |-- catalog.json
-|   `-- <method>/steps-30_guidance-7.5/
-|       |-- h-params.json
-|       `-- artifacts.safetensors
-`-- output/<run-id>/
-    |-- sweep.json
-    `-- <parameter-file>/<method>/
-        |-- resolved-config.json
-        |-- results.jsonl
-        |-- batches.jsonl
-        `-- tensors/
-            `-- batch-<edit_batch_id>.safetensors
+Each invocation writes `data/output/<run-id>/`, with a sweep manifest and one
+`<parameter-file>/<method>/` directory per comparison. Method directories contain
+configuration snapshots, sample results, batch timings, and uncompressed
+`reconstructed` / `edited` uint8 RGB tensors in `[N, 3, height, width]` layout.
+
+Two 512 ? 512 results use 1.5 MiB per sample, or about 8.2 GiB for 1,400 samples
+across four methods. See [run outputs](docs/run-outputs.md) for the directory
+layout, tensor-loading examples, and timing definitions.
+
+Inversions live separately under `data/artifacts/`. Changing only attention
+fractions or editing policies reuses compatible inversions. Changing method
+parameters or editing guidance invalidates reuse; changing steps or inversion
+guidance selects another artifact group. See
+[artifact storage and compatibility](docs/artifacts.md).
+
+## Evaluate archived runs
+
+Archive a finished run with the Python
+[`compress_run` API](docs/workflows.md#compress-a-finished-run). It verifies the
+ZIP, publishes it under `data/output/`, then deletes the original run directory.
+Install metric dependencies and evaluate one archive or all available ZIPs:
+
+```powershell
+uv sync --extra evaluation
+uv run --extra evaluation evaluate data/output/<run-id>.zip --device cuda --batch-size 16
+uv run --extra evaluation evaluate
 ```
 
-New files under `data/` are ignored by Git; previously tracked history remains.
-Each invocation returns its parent run directory. Results retain raw UIDs and
-artifact positions, plus a relative `tensor_file` and zero-based `tensor_index`.
-Each editing batch atomically publishes uncompressed `reconstructed` and `edited`
-uint8 tensors in RGB `[N, 3, height, width]` layout. New runs save no PNG files;
-VAE decoding and pixel quantization still run. Historical PNG outputs are retained.
-At 512x512, two results occupy 1.5 MiB per sample; a full 1,400-sample, four-method
-run stores about 8.2 GiB of pixels. See [tensor loading examples](docs/artifacts.md#rgb-tensor-outputs).
+Replace `<run-id>` with an existing archive name. Omitting paths selects all
+`data/output/*.zip`; explicit paths resolve from the current working directory.
+The evaluator reads archived batches without extracting whole runs. It downloads
+pinned metric weights on first use and caches them in `data/cache/evaluation/`.
+CPU and MPS are also supported; metrics use float32.
 
-Changing attention fractions or editing policies reuses compatible inversions.
-Changing steps or inversion CFG selects another artifact group. Changing any
-method hyperparameter or pipeline editing CFG invalidates reuse; affected entries
-are replaced only after successful publication.
-Interrupted inversion leaves the previous published group intact; editing failure
-leaves completed inversions reusable. New artifacts embed metadata and tensor checksums,
-so valid published files remain recoverable when catalog updates are interrupted.
-Unverifiable existing groups are preserved and block replacement; legacy replay
-requires a matching catalog checksum. Use `batches.jsonl` for aggregate timing:
-per-image batch durations repeat and must not be summed across members.
+Each ZIP produces one JSON report under `data/metrics/<UTC-time>-<unique-id>/`.
+Reports include full-image and edited-region CLIP, masked PSNR/SSIM/LPIPS, and
+batch-amortized inversion/editing core time. Results are grouped by parameter
+file, method, and source (`all`, `pie-bench`, `magic-brush`). Cached inversion
+time is zero for the evaluated invocation; replay-only inversion time is unknown.
+See [evaluation definitions and JSON layout](docs/evaluation.md).
 
-## Compress a finished run
+### Summarize existing metrics
 
-Use the Python API with one directory name under `data/output/`:
+Create Markdown and CSV summaries without loading datasets or models:
 
-```python
-from image_editing_inversion.workflows import compress_run
-
-archive_path = compress_run("20261013T080000Z-01234567")  # Replace with an existing run ID.
-# After run_methods() or edit_artifacts() returns, use compress_run(run_dir.name).
-print(archive_path)
+```powershell
+uv run python -m image_editing_inversion.evaluation.summary
+uv run python -m image_editing_inversion.evaluation.summary data/metrics/<report-directory>
 ```
 
-The API writes `data/output/<run-id>.zip` and returns its absolute path. It
-preserves the `<run-id>/` top-level directory, all files (including hidden files),
-and empty directories. It uses DEFLATE level 6 and ZIP64, streaming one file at a
-time. Only runs whose `sweep.json` status is `ok` or `error` are accepted. Pass a
-directory name, not a path; links, junctions, and special files are rejected.
+Omitted inputs recursively select JSON reports under `data/metrics/`, excluding
+`summaries/`. Each invocation writes `report.md` and `summary.csv` under
+`data/metrics/summaries/<UTC-time>-<unique-id>/`. Reports retain quality statistics,
+core timing, cache counts, experiment settings, and provenance for each run.
+The summarizer uses only the standard library and keeps different runs separate.
+See [summary format and limitations](docs/evaluation.md#summarizing-existing-reports).
 
-After checking member names, sizes, and all CRCs, it atomically replaces any
-existing same-name ZIP and deletes the original run directory. Failures before
-publication preserve the source and the old ZIP. If deletion fails, the verified
-ZIP remains and the exception reports its path; the source directory may have
-been partially deleted. Ensure the run is inactive and no other process modifies
-the run or ZIP during this call; change detection does not provide a writer lock.
-There is no compression CLI or HTTP endpoint. See the
-[archive storage contract](docs/artifacts.md#run-archives).
+## Documentation
 
-## References
-
-- [Dataset schema and provenance](docs/dataset.md)
-- [Bundled methods and hyperparameters](docs/methods.md)
-- [Artifact formats, caching, replay, and timing](docs/artifacts.md)
-- [Direct reconstruction diagnostic tests](docs/direct-reconstruction-tests.md)
-- [Adapters, attention extensions, and API migration](docs/adapters.md)
-- [Architecture and module responsibilities](structure.md)
-
-Import public APIs from `config`, `data`, `artifacts`, `inversion`, `generation`,
-and `workflows`. External adapters register zero-argument factories. A reusable
-`WorkflowRunner` creates a fresh session per call; configuration, dataset/model
-ownership, and execution state remain internal.
+| Guide | Covers |
+| --- | --- |
+| [Configuration](docs/configuration.md) | Shared settings, pipeline presets, guidance, runtime, and paths |
+| [Workflows](docs/workflows.md) | Experiments, full runs, sweeps, Python API, replay, and compression |
+| [Dataset](docs/dataset.md) | Record schema, loading, source selection, and split construction |
+| [Methods](docs/methods.md) | Algorithms, requirements, and method-specific hyperparameters |
+| [Artifacts](docs/artifacts.md) | Inversion collections, cache identity, publication, and replay compatibility |
+| [Run outputs](docs/run-outputs.md) | RGB tensors, result records, batch timing, and archive format |
+| [Evaluation](docs/evaluation.md) | Metric definitions, archived reports, and Markdown/CSV summaries |
+| [Null-text diagnostics](docs/null-text-diagnostics.md) | Optimization observations and replay comparisons |
+| [Direct diagnostics](docs/direct-reconstruction-tests.md) | Opt-in reconstruction checks and controlled comparisons |
+| [Adapter extensions](docs/adapters.md) | Custom methods, denoising hooks, attention policies, and API migration |
+| [Project structure](structure.md) | Module responsibilities, dependency boundaries, and execution lifecycle |

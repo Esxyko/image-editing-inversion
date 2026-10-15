@@ -1,5 +1,21 @@
 # Adapter extensions
 
+Extend inversion algorithms and attention behavior through registered adapters.
+The shared runtime continues to own model loading, denoising, and output handling.
+
+- [Adapter contract](#adapter-contract)
+- [Configuration and provenance](#configuration-and-provenance)
+- [Batched inversion](#batched-inversion)
+- [Cache reuse and result metadata](#cache-reuse-and-result-metadata)
+- [Static state and source embeddings](#static-state-and-source-embeddings)
+- [Batched denoising hooks](#batched-denoising-hooks)
+- [Attention policies](#attention-policies)
+- [Register and run an adapter](#register-and-run-an-adapter)
+- [Factory registration and lifetimes](#factory-registration-and-lifetimes)
+- [Migration](#migration)
+
+## Adapter contract
+
 Import adapter contracts from the inversion subpackage:
 
 ```python
@@ -26,6 +42,8 @@ Override the optional `validate_replay(artifact, context)` to check method-speci
 state or configuration before the runner creates that hook; the default does
 nothing. Direct editor callers should invoke this validation themselves before
 creating a method's hook.
+
+## Configuration and provenance
 
 Override `method_h_params(config)` to expose resolved method hyperparameters in
 each inversion and replay run's `resolved-config.json`. Return a JSON-compatible
@@ -56,6 +74,8 @@ Missing either field, differing editing CFG, or any differing method hyperparame
 prevent reuse and replay. The runner attaches provenance when the adapter leaves
 it unset; `method_parameters` continues to describe effective algorithm inputs.
 
+## Batched inversion
+
 Adapters can override `invert_batch(samples, context)` to perform batched model
 calls and must return one artifact per input, in input order. The workflow supplies
 up to `runtime.inversion_batch_size` uncached samples. The default implementation
@@ -67,6 +87,8 @@ omitting `dtype` preserves a tensor's existing dtype.
 Raise `ArtifactCompatibilityError` from `image_editing_inversion.artifacts`
 for configuration mismatches that replay sweeps can skip; keep malformed-state
 errors as ordinary exceptions.
+
+## Cache reuse and result metadata
 
 Automatic artifact reuse is opt-in for external adapters. Override
 `inversion_cache_parameters(context)` and return a JSON-compatible mapping of
@@ -80,17 +102,21 @@ denoising step. A hook may expose `reconstruction_guidance_scale` as a finite
 nonnegative float to use its calibrated CFG for the source branch. The default
 is `None`, using editing CFG. Batched hooks supply one value for the batch;
 pair hooks supply one per source. Null-text uses its saved optimization CFG;
-ReNoise uses the default editing CFG. Optional batch hooks are described below. Install the method through the
-`image_editing_inversion.methods` Python entry-point group. Contracts are exported from `image_editing_inversion.inversion`; bundled
-implementations live under `image_editing_inversion.inversion.methods`.
-Published inversion implementations can then be adapted without changing the
-common editor.
+ReNoise uses the default editing CFG. See [batched denoising hooks](#batched-denoising-hooks)
+for the batch contract.
+
+Contracts are exported from `image_editing_inversion.inversion`; bundled
+implementations live under `image_editing_inversion.inversion.methods`. Register
+a method through the `image_editing_inversion.methods` entry-point group to use
+it with the shared editor.
 
 Adapters can override `result_metadata(artifact)` to expose JSON-compatible
 method diagnostics in sample result records after successful preparation,
 including editing errors. The default returns an empty mapping. Derive diagnostics
 from saved artifact state so cache hits and replay retain the original values.
 Shared result fields take precedence over method diagnostics.
+
+## Static state and source embeddings
 
 Adapters may store per-image tensors in `artifact.static_state`, which uses
 collection schema v2 and is serialized separately from `per_step_state`.
@@ -126,6 +152,8 @@ Direct editor calls pass either `hooks=[...]` or `batch_hook=...`, never both.
 The built-in Null-text, Direct, and ReNoise adapters use batch hooks in workflows.
 Their subclasses retain pair hooks unless they explicitly implement the new
 factory, so existing subclass-specific pair callbacks are preserved.
+
+## Attention policies
 
 To customize attention behavior, subclass `PromptToPrompt` from
 `image_editing_inversion.generation` and return that class from the adapter's
@@ -195,6 +223,8 @@ methods:
     prompt_to_prompt:
       target_weight: 0.25
 ```
+
+## Register and run an adapter
 
 For example, an adapter package can declare:
 

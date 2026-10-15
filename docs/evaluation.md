@@ -1,8 +1,38 @@
 # Archived-run evaluation
 
+Evaluate successful RGB run archives without generating images or extracting
+whole ZIP files. The evaluator writes detailed JSON reports; the independent
+summarizer turns existing reports into Markdown and CSV tables.
+
+- [Run evaluation](#run-evaluation)
+- [Inputs and identity](#inputs-and-identity)
+- [Metric definitions](#metric-definitions)
+- [Two-stage core timing](#two-stage-core-timing)
+- [JSON layout and publication](#json-layout-and-publication)
+- [Summarizing existing reports](#summarizing-existing-reports)
+
+## Run evaluation
+
+```powershell
+uv sync --extra evaluation
+uv run --extra evaluation evaluate
+uv run --extra evaluation evaluate data/output/<run-id>.zip --device cuda --batch-size 16
+```
+
+Replace `<run-id>` with an existing archive name. Omitting ZIP paths selects all
+archives directly under `data/output/`. CPU and MPS are also supported; reduce
+`--batch-size` for smaller devices.
+
 `evaluate_archives(archives=None, *, device="cuda", batch_size=16) -> Path` is
 exported by `image_editing_inversion.evaluation`. The `evaluate` CLI has the same
 selection and settings. Install with `uv sync --extra evaluation`.
+
+```python
+from image_editing_inversion.evaluation import evaluate_archives
+
+report_dir = evaluate_archives(["data/output/<run-id>.zip"], device="cuda", batch_size=16)
+print(report_dir)
+```
 
 Omitted inputs select the ZIP files directly inside the fixed `data/output`
 directory. Explicit inputs are file paths resolved from the caller's working
@@ -126,8 +156,68 @@ Archive member SHA-256 hashes cover the manifests, configuration, records, timin
 and tensors read by the evaluator. Archive size/modification checks detect input
 changes before publication. A failure leaves no partial final JSON for that
 archive; reports for previously completed ZIPs remain usable. Temporary output is
-removed on failure. There are no workbook, preview, or separate summary files.
+removed on failure. Evaluation itself creates no workbook, preview, or separate
+summary files. The independent summarizer below can extract compact reports later.
 
-Definitions: [CLIP model](https://huggingface.co/openai/clip-vit-large-patch14),
+## Summarizing existing reports
+
+```powershell
+uv run python -m image_editing_inversion.evaluation.summary [REPORT_OR_DIR ...]
+```
+
+### Input selection
+
+`evaluation/summary.py` implements `MetricsSummarizer(reports=None).run() -> Path`.
+It reads existing JSON group statistics using only the standard library; it
+does not load datasets, diffusion models or metric dependencies, or recompute
+scores. The existing `evaluate_archives` API and evaluator outputs are unchanged.
+
+Omitted inputs recursively select JSON files inside the fixed `data/metrics/`
+root, excluding its `summaries/` subtree. Explicit file/directory paths resolve
+from the caller's working directory; directories expand recursively and repeated
+resolved files are deduplicated. Reports must use `schema_version=1` and
+`status=complete`. Historical one-off formats are unsupported. Invalid inputs
+fail with their report path and relevant field before publishing any output.
+
+### Output files
+
+Every invocation publishes a fresh directory
+`data/metrics/summaries/<UTC-time>-<unique-id>/` containing:
+
+- **`report.md`:** source reports, dataset identity, distinct metric protocol
+  summaries, compact experiment settings, and separate quality and timing tables
+  for `all`, `pie-bench`, and `magic-brush`. Quality cells show mean, sample std
+  and valid n; timing tables include both phase counts, total core seconds,
+  mean core seconds per image, cache known/hit counts, and cache hit rate.
+- **`summary.csv`:** one row per source report, parameter file, method and group.
+  Source columns include `source_id`, absolute `source_report`, archive filename,
+  dataset reference/fingerprint/content digest/split/source assignment, and a
+  `protocol_id` with compact JSON `evaluation_protocol`. IDs are local to this
+  output. Settings include model ID/revision/resolution, sampling steps/seed/editing
+  CFG, attention replacement fractions, and JSON `method_h_params`. Statistical
+  columns are `sample_count`, `<metric>_n/mean/std`,
+  `<phase>_n/total_core_seconds/mean_core_seconds_per_image`, and
+  `inversion_cache_known_count/hit_count/hit_rate` (each slash denotes separate
+  columns, with the prefix repeated).
+
+CSV uses UTF-8 with BOM for Excel compatibility and preserves original numeric
+precision. Null is an empty CSV cell and infinite PSNR is `+inf`. Markdown uses
+four decimal places, `—` for null, and `+∞` for infinite PSNR. Cache hit rates
+are fractions in `[0, 1]`. Source IDs distinguish repeated parameter/method names
+across reports; rows are never averaged across runs, datasets or protocols.
+The `all` statistics are copied directly rather than averaged from source means.
+
+### Interpretation and limitations
+
+The summarizer omits per-image scores, full configuration snapshots, member
+hashes and evaluation duration. Core times remain observed batch-amortized times,
+with cached inversion zeros and unknown timing distinguished. They must not be
+read as cold-cache method benchmarks or individually measured image latencies.
+The script preserves all inputs and publishes the two outputs together only
+after validation and serialization succeed.
+
+## Metric sources
+
+[CLIP model](https://huggingface.co/openai/clip-vit-large-patch14),
 [PIE-Bench masking implementation](https://github.com/cure-lab/PnPInversion/blob/main/evaluation/matrics_calculator.py),
 [official LPIPS](https://github.com/richzhang/PerceptualSimilarity).
